@@ -19,7 +19,13 @@ from core.agent_harness.spi.handoff import (
     format_ask_user_answers,
     question_key,
 )
+from core.agent_harness.spi.session_state import PendingUserChoice
 from core.agent_harness.spi.task_plan import discard_task_plan
+from infrastructure.analytics.capture import (
+    capture_ask_user_prompt_answered,
+    capture_ask_user_prompt_dismissed,
+    capture_ask_user_prompt_rendered,
+)
 from infrastructure.terminal import theme as ui_theme
 from infrastructure.terminal.notify import NotifyEvent, play_notification
 from surfaces.interactive_shell.command_registry.types import SlashCommand
@@ -39,6 +45,35 @@ from surfaces.shared.terminal.components.choice_menu import (
 _CANCELLED = "Selection cancelled — type a reply instead."
 _DEMO_SKIPPED = "Demo skipped — type a request, or /demo to come back to it."
 _DEMO_UNAVAILABLE = "Guided demo selection is unavailable here — request a task directly."
+
+
+def _analytics_questions(pending: PendingUserChoice) -> list[dict[str, object]]:
+    items = pending.items()
+    return [
+        {
+            "label": item.label,
+            "title": item.title,
+            "options": list(item.options),
+            "multi_select": item.multi_select,
+        }
+        for item in items
+    ]
+
+
+def _capture_prompt_rendered(
+    session: Session,
+    pending: PendingUserChoice,
+    *,
+    render_mode: str,
+) -> None:
+    capture_ask_user_prompt_rendered(
+        interaction_id=pending.interaction_id,
+        questions=_analytics_questions(pending),
+        render_mode=render_mode,
+        allow_custom=bool(pending.custom_answer),
+        has_command_options=bool(pending.commands),
+        skill_name=session.active_skill,
+    )
 
 
 def _remember_answered(session: Session, *titles: str) -> None:
@@ -68,6 +103,7 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
         return True
 
     if not repl_tty_interactive():
+        _capture_prompt_rendered(session, pending, render_mode="text_fallback")
         if session.active_skill == ONBOARDING_SKILL_NAME:
             _leave_menu(session, console, _DEMO_UNAVAILABLE)
             return True
@@ -81,13 +117,27 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
         return True
 
     items = pending.items()
+    skill_name = session.active_skill
+    _capture_prompt_rendered(session, pending, render_mode="picker")
     clear_live_prompt_paint(session)
     play_notification(NotifyEvent.INPUT_NEEDED)  # the agent is now waiting on the user
     if pending.is_batch():
         picked = repl_ask_user(items)
         if picked is None:
+            capture_ask_user_prompt_dismissed(
+                interaction_id=pending.interaction_id,
+                reason="cancelled",
+                skill_name=skill_name,
+            )
             _leave_menu(session, console, _CANCELLED)
             return True
+        capture_ask_user_prompt_answered(
+            interaction_id=pending.interaction_id,
+            questions=_analytics_questions(pending),
+            answers=picked,
+            disposition="agent_answer",
+            skill_name=skill_name,
+        )
         _remember_answered(session, *(question.title for question in items))
         session.terminal.set_auto_command(format_ask_user_answers(items, picked))
         session.terminal.awaiting_handoff_answer = True
@@ -116,14 +166,33 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
     )
     capture_onboarding_choice(session.active_skill, picked_one, custom=custom_answer)
     if picked_one is None:
+        capture_ask_user_prompt_dismissed(
+            interaction_id=pending.interaction_id,
+            reason="cancelled",
+            skill_name=skill_name,
+        )
         _leave_menu(session, console, _CANCELLED)
         return True
+    command = pending.commands.get(picked_one) or (picked_one if picked_one.startswith("/") else "")
+    if picked_one == SKIP_DEMO_OPTION:
+        disposition = "demo_skipped"
+    elif command:
+        disposition = "command"
+    else:
+        disposition = "agent_answer"
+    capture_ask_user_prompt_answered(
+        interaction_id=pending.interaction_id,
+        questions=_analytics_questions(pending),
+        answers=(picked_one,),
+        disposition=disposition,
+        skill_name=skill_name,
+        explicit_custom=custom_answer,
+    )
     if picked_one == SKIP_DEMO_OPTION:
         # A shell decision, not an answer for the model: the demo is over.
         _leave_menu(session, console, _DEMO_SKIPPED)
         return True
 
-    command = pending.commands.get(picked_one) or (picked_one if picked_one.startswith("/") else "")
     if command:
         # A mapped option, or a slash command typed into the custom row, is a
         # command the shell runs, not an answer for the model.

@@ -71,6 +71,39 @@ def test_selection_is_auto_submitted_as_next_user_message(
     assert "Commit the changes" in output
 
 
+def test_selection_analytics_links_rendered_prompt_to_chosen_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = Session()
+    session.pending_user_choice = _CHOICE
+    console, _buf = _console()
+    rendered: list[dict[str, object]] = []
+    answered: list[dict[str, object]] = []
+    monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: True)
+    monkeypatch.setattr(
+        choice_prompt,
+        "repl_choose_one",
+        lambda **_kwargs: "Commit the changes",
+    )
+    monkeypatch.setattr(
+        choice_prompt,
+        "capture_ask_user_prompt_rendered",
+        lambda **properties: rendered.append(properties),
+    )
+    monkeypatch.setattr(
+        choice_prompt,
+        "capture_ask_user_prompt_answered",
+        lambda **properties: answered.append(properties),
+    )
+
+    assert _handler(session, console) is True
+
+    assert rendered[0]["interaction_id"] == answered[0]["interaction_id"]
+    assert rendered[0]["render_mode"] == "picker"
+    assert answered[0]["answers"] == ("Commit the changes",)
+    assert answered[0]["disposition"] == "agent_answer"
+
+
 def test_cancelled_menu_leaves_prompt_free(monkeypatch: pytest.MonkeyPatch) -> None:
     session = Session()
     session.pending_user_choice = _CHOICE

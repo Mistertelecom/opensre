@@ -1063,5 +1063,5 @@ def capture_install_detected_if_needed(properties: Properties | None = None) -> 
     return True
 
 
-def capture_first_run_if_needed() -> None:
-    capture_install_detected_if_needed()
+def capture_first_run_if_needed(properties: Properties | None = None) -> None:
+    capture_install_detected_if_needed(properties)

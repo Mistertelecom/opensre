@@ -44,7 +44,13 @@ def fetch_remote_branch(
         )
 
 
-def merge_ref(workspace: str, ref: str, *, message: str) -> bool:
+def merge_ref(
+    workspace: str,
+    ref: str,
+    *,
+    message: str,
+    analytics_workflow: str = "unspecified",
+) -> bool:
     """Merge *ref* into HEAD with a merge commit.
 
     Returns True when the merge committed cleanly. Returns False when git
@@ -55,6 +61,13 @@ def merge_ref(workspace: str, ref: str, *, message: str) -> bool:
         workspace, "merge", "--no-ff", "--no-edit", "-m", _with_opensre_coauthor(message), ref
     )
     if result.returncode == 0:
+        from infrastructure.analytics.capture import capture_opensre_commit_created
+
+        capture_opensre_commit_created(
+            workflow=analytics_workflow,
+            commit_kind="merge",
+            changed_file_count=0,
+        )
         return True
     if unmerged_paths(workspace):
         return False
@@ -134,7 +147,7 @@ def _indexed(workspace: str, paths: Sequence[str]) -> set[str]:
     return {path for path in result.stdout.split("\0") if path}
 
 
-def commit_merge(workspace: str) -> str:
+def commit_merge(workspace: str, *, analytics_workflow: str = "unspecified") -> str:
     """Conclude the in-progress merge with its prepared message; return the new HEAD.
 
     ``--cleanup=strip`` drops the ``# Conflicts:`` comment block git adds to the
@@ -143,6 +156,13 @@ def commit_merge(workspace: str) -> str:
     result = _run_git(workspace, "commit", "--no-edit", "--cleanup=strip")
     if result.returncode != 0:
         raise GitCommandError(COMMIT_FAILED, f"git commit failed: {result.stderr.strip()}")
+    from infrastructure.analytics.capture import capture_opensre_commit_created
+
+    capture_opensre_commit_created(
+        workflow=analytics_workflow,
+        commit_kind="merge",
+        changed_file_count=0,
+    )
     return head_sha(workspace)
 
 
