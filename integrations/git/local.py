@@ -16,14 +16,19 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
-from config.constants.git import OPENSRE_COMMIT_COAUTHOR_TRAILER
+from config.constants.git import (
+    OPENSRE_COMMIT_COAUTHOR_EMAIL,
+    OPENSRE_COMMIT_COAUTHOR_NAME,
+    OPENSRE_COMMIT_COAUTHOR_TRAILER,
+)
 from integrations.git.errors import (
     BRANCH_FAILED,
     COMMIT_FAILED,
     GIT_UNAVAILABLE,
+    MERGE_FAILED,
     NOT_A_GIT_REPO,
     PROTECTED_BRANCH,
     PUSH_FAILED,
@@ -48,6 +53,17 @@ def _with_opensre_coauthor(message: str) -> str:
     if not stripped:
         return trailer
     return f"{stripped}\n\n{trailer}"
+
+
+def _opensre_author_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment that makes git record the OpenSRE Agent account as author and committer."""
+    identity = {
+        "GIT_AUTHOR_NAME": OPENSRE_COMMIT_COAUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": OPENSRE_COMMIT_COAUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": OPENSRE_COMMIT_COAUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": OPENSRE_COMMIT_COAUTHOR_EMAIL,
+    }
+    return {**(env if env is not None else os.environ), **identity}
 
 
 def _run_git(
@@ -268,6 +284,33 @@ def file_fingerprints(workspace: str, paths: Sequence[str]) -> dict[str, str]:
     return fingerprints
 
 
+def staged_paths(workspace: str) -> list[str]:
+    """Paths whose index entry differs from HEAD (added, modified, deleted, renamed)."""
+    result = _run_git(workspace, "diff", "--cached", "--name-only", "--no-renames", "-z")
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def unstage_paths(workspace: str, paths: Sequence[str]) -> None:
+    """Restore the index entries of *paths* from HEAD, leaving the working tree as it is."""
+    if not paths:
+        return
+    result = _run_git(workspace, "reset", "-q", "--", *paths)
+    if result.returncode != 0:
+        raise GitCommandError(MERGE_FAILED, f"git reset failed: {result.stderr.strip()}")
+
+
+def changed_since_baseline(workspace: str, *, baseline: Mapping[str, str] | None) -> list[str]:
+    """Dirty paths that are new or whose content differs from *baseline* fingerprints."""
+    pre_existing = dict(baseline or {})
+    current = changed_paths(workspace)
+    current_fingerprints = file_fingerprints(workspace, current)
+    return [
+        path
+        for path in current
+        if path not in pre_existing or current_fingerprints.get(path, "") != pre_existing[path]
+    ]
+
+
 def assert_not_protected(branch: str, *, protected_extra: str = "") -> None:
     """Raise unless *branch* is a safe, non-base feature branch to push to."""
     name = branch.strip()
@@ -349,6 +392,37 @@ def commit_paths(
         commit_kind="content",
         changed_file_count=len(set(paths)),
     )
+
+
+def upstream_branch(workspace: str) -> str:
+    """``remote/branch`` the current branch tracks, or empty when it tracks nothing."""
+    result = _run_git(workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def push_head_to_upstream(workspace: str, *, token: str | None = None) -> str:
+    """Push HEAD to the branch it tracks (or to a same-named branch); return ``remote/branch``.
+
+    The remote branch must not be a protected base branch.
+    """
+    upstream = upstream_branch(workspace)
+    if not upstream:
+        branch = current_branch(workspace)
+        push_branch(workspace, branch, token=token)
+        return f"origin/{branch}"
+    remote, _, remote_branch = upstream.partition("/")
+    assert_not_protected(remote_branch)
+    env = None
+    if token:
+        base = _remote_https_base(workspace, remote)
+        if base:
+            env = _token_auth_env(token, base)
+    result = _run_git(workspace, "push", remote, f"HEAD:refs/heads/{remote_branch}", env=env)
+    if result.returncode != 0:
+        raise GitCommandError(
+            PUSH_FAILED, f"git push to {upstream} failed: {result.stderr.strip()}"
+        )
+    return upstream
 
 
 def push_branch(
