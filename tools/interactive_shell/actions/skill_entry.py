@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
+from core.agent_harness import normalize_skill_name
 from core.agent_harness.spi.grounding import ActionSkill, list_action_skills, load_skill_body
 from core.agent_harness.spi.handoff import question_key
 from core.agent_harness.tools import ActionToolScope, ToolExecutor
@@ -35,9 +36,17 @@ MENU_QUEUED_INSTRUCTION = (
     "user message."
 )
 
+_MENU_SUPPRESSED_INSTRUCTION = (
+    "No new menu was opened by this skill entry. Its entry menu was suppressed "
+    "because the skill is already active or was already prompted. Continue "
+    "the current request using existing answers when available. Follow the "
+    "skill's recovery instructions if the user explicitly requests reopening. "
+    "Do not claim a new menu is waiting."
+)
+
 
 def _skill_by_name(name: str) -> ActionSkill | None:
-    slug = name.strip().lower().replace("_", "-")
+    slug = normalize_skill_name(name)
     return next((skill for skill in list_action_skills() if skill.name == slug), None)
 
 
@@ -111,21 +120,31 @@ def enter_skill(name: str, ctx: Any, *, from_model: bool = False) -> dict[str, A
             "error": f"unknown skill {name!r}",
             "available": available,
         }
-    # The flow is now inside this skill: the next answer turn offers only its tools.
     session = getattr(ctx, "session", None)
-    if session is not None:
+    already_active = (
+        from_model and session is not None and getattr(session, "active_skill", None) == skill.name
+    )
+    # Re-entry retains the active skill and does not reopen an answered menu.
+    if session is not None and not already_active:
         session.active_skill = skill.name
-        session.active_skill_tools = tuple(skill.tools)
-        session.skill_hooks_fired = set()
     if skill.pre_execute and not from_model:
         _forget_hook_questions(session, skill)
-    hooks = (
-        _run_pre_execute(skill, ctx)
-        if skill.pre_execute
-        and isinstance(ctx, ActionToolScope)
-        and _may_open_menu(session, skill, from_model=from_model)
-        else []
-    )
+    hooks: list[dict[str, Any]] = []
+    if skill.pre_execute and isinstance(ctx, ActionToolScope):
+        if already_active or not _may_open_menu(session, skill, from_model=from_model):
+            hooks = [
+                {
+                    "ok": False,
+                    "tool": call.tool,
+                    "menu": "suppressed",
+                    "reason": "already_active" if already_active else "already_prompted",
+                    "instruction": _MENU_SUPPRESSED_INSTRUCTION,
+                }
+                for call in skill.pre_execute
+                if call.tool == "ask_user_choice"
+            ]
+        else:
+            hooks = _run_pre_execute(skill, ctx)
     if pre_execute_queued_menu(hooks) and session is not None:
         already = getattr(session, "skills_already_prompted", None)
         if isinstance(already, set):
@@ -133,15 +152,24 @@ def enter_skill(name: str, ctx: Any, *, from_model: bool = False) -> dict[str, A
     content = body
     if pre_execute_queued_menu(hooks):
         content = "".join((body, "\n\n", MENU_QUEUED_INSTRUCTION))
+    elif any(item.get("menu") == "suppressed" for item in hooks):
+        content = "".join((body, "\n\n", _MENU_SUPPRESSED_INSTRUCTION))
     # ``summary`` is what the user sees; ``content`` is for the model only.
     # Without it the generic formatter prints the whole skill body on screen.
-    return {
+    result = {
         "ok": True,
         "name": skill.name,
-        "summary": f"loaded the {skill.name} skill",
+        "summary": (
+            f"the {skill.name} skill is already active"
+            if already_active
+            else f"loaded the {skill.name} skill"
+        ),
         "content": content,
         "pre_execute": hooks,
     }
+    if already_active:
+        result["already_active"] = True
+    return result
 
 
 __all__ = ["MENU_QUEUED_INSTRUCTION", "enter_skill", "pre_execute_queued_menu"]

@@ -76,7 +76,7 @@ def _report(*, owner: str = "apache", repo: str = "airflow", red_hours: float = 
         branch_runs=20,
         branch_failures=2,
         red_hours=red_hours,
-        outages=(Outage(workflow="CI", started_at=now, ended_at=None, first_failure_url="u"),),
+        outages=(Outage(workflows=("CI",), started_at=now, ended_at=None, first_failure_url="u"),),
         mean_recovery_hours=6.1,
         workflows=(WorkflowSummary("CI", 100, 8, 3, 12.0),),
         coverage_notices=("partial",),
@@ -121,34 +121,24 @@ def test_the_comparison_needs_no_saved_peer_figures(tmp_path: Path, monkeypatch)
     result = cast(Any, tool_module.analyze_github_ci_reliability)(owner="acme", repo="app", days=30)
 
     # Assert
-    text = result["response_text"]
-    for benchmark in BENCHMARKS:
-        assert benchmark.label in text
-    assert f"{MEASURED_ON:%d %b %Y}" in text
+    peers = {f"{item['owner']}/{item['repo']}": item["figures"] for item in result["benchmarks"]}
+    assert peers == {benchmark.label: dict(benchmark.figures) for benchmark in BENCHMARKS}
     assert result["benchmarks_measured_on"] == MEASURED_ON.isoformat()
 
 
-def test_the_report_leads_with_what_unreliable_ci_cost(tmp_path: Path, monkeypatch) -> None:
-    """Key results opened on red hours; a reader had to turn that into a cost themselves."""
+def test_the_report_leads_with_what_unreliable_ci_cost() -> None:
+    """Key results opened on red hours; a reader had to turn that into a cost themselves.
+
+    The scheduled loop delivers this rendering unattended; the interactive
+    tool returns figures only.
+    """
     # Arrange
-    from typing import Any, cast
-
-    from integrations.github.tools.ci_analytics import tool as tool_module
-
-    monkeypatch.setattr(tool_module, "snapshot_root", lambda _root=None: tmp_path)
-    monkeypatch.setattr(tool_module, "resolve_github_token", lambda _t=None: "tok")
+    from integrations.github.tools.ci_analytics.render import render_markdown
 
     blocked = dataclasses.replace(_report(owner="acme", repo="app"), blocked_working_minutes=90.0)
 
-    def _analyze(_owner: str, _repo: str, **_kwargs: Any) -> Any:
-        return type("A", (), {"report": blocked, "runs_read": 3})()
-
-    monkeypatch.setattr(tool_module, "analyze_repository", _analyze)
-
     # Act
-    text = cast(Any, tool_module.analyze_github_ci_reliability)(owner="acme", repo="app", days=30)[
-        "response_text"
-    ]
+    text = render_markdown(blocked)
 
     # Assert: the cost sentence sits above Key results and is not repeated as a row.
     assert text.index("Waiting on CI cost") < text.index("**Key results**")
@@ -176,6 +166,38 @@ def test_the_schedule_card_report_comes_from_todays_saved_figures(
     assert generated_at
     assert "**Key results**" in text
     assert "Next:" not in text
+
+
+def test_a_snapshot_from_an_older_report_shape_is_treated_as_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A same-day snapshot written before a report-shape change must not crash the card."""
+    # Arrange: today's snapshot carries the pre-rename outage shape (`workflow`, singular).
+    from integrations.github.tools.ci_analytics import tool as tool_module
+    from integrations.github.tools.ci_analytics.snapshots import report_to_dict
+
+    report = _report()
+    saved = report_to_dict(report)
+    saved["outages"] = [
+        {"workflow": "CI", "started_at": report.generated_at.isoformat(), "ended_at": None}
+    ]
+    now = datetime.now(UTC)
+    write_snapshot(
+        tmp_path,
+        report.owner,
+        report.repo,
+        now - timedelta(minutes=5),
+        {
+            "generated_at": (now - timedelta(minutes=5)).isoformat(),
+            "window_days": 30,
+            "headline": "h",
+            "report": saved,
+        },
+    )
+    monkeypatch.setattr(tool_module, "snapshot_root", lambda _root=None: tmp_path)
+
+    # Act / Assert: the card shows no report instead of raising.
+    assert tool_module.report_text_from_snapshot("apache", "airflow") == ("", "")
 
 
 def test_a_saved_snapshot_never_answers_a_live_analysis(tmp_path: Path, monkeypatch) -> None:
@@ -225,18 +247,20 @@ def test_two_windows_written_in_the_same_second_do_not_overwrite(tmp_path: Path)
 
 
 def test_a_benchmark_repository_is_not_compared_with_itself() -> None:
-    """Analyzing apache/airflow put an airflow column beside the airflow column."""
+    """Analyzing a benchmark repository put its column beside its own column."""
     # Arrange
+    from integrations.github.tools.ci_analytics.benchmarks import BENCHMARKS
     from integrations.github.tools.ci_analytics.render import comparison_markdown, peer_benchmarks
 
-    report = _report(owner="apache", repo="airflow")
+    analyzed, *others = BENCHMARKS
+    report = _report(owner=analyzed.owner, repo=analyzed.repo)
 
     # Act
     markdown = comparison_markdown(report, peer_benchmarks(report))
 
     # Assert: the analyzed repository appears once, as the first column.
-    assert markdown.count("apache/airflow") == 1
-    assert "fastapi/fastapi" in markdown
+    assert markdown.count(analyzed.label) == 1
+    assert all(other.label in markdown for other in others)
 
 
 def test_repositories_whose_names_join_the_same_way_do_not_share_a_snapshot(

@@ -15,6 +15,9 @@ from integrations.github.client import GitHubApiError, GitHubRestClient, resolve
 
 #: Public name -> the submodule that defines it, imported on first access.
 _LAZY_EXPORTS: dict[str, str] = {
+    "run_ci_repair_worker": "integrations.github.tools.ci_repair_loop.worker",
+    "count_ci_fixes": "integrations.github.tools.ci_fix.ledger",
+    "get_ci_fix_counter": "integrations.github.tools.ci_fix.ledger",
     "github_creds": "integrations.github.helpers",
     "saved_github_username": "integrations.github.identity",
     "GitHubLoginResult": "integrations.github.login",
@@ -40,7 +43,6 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Analysis": "integrations.github.tools.ci_analytics.analysis",
     "analyze_repository": "integrations.github.tools.ci_analytics.analysis",
     "ci_report_headline": "integrations.github.tools.ci_analytics.render",
-    "render_ci_report": "integrations.github.tools.ci_analytics.render",
     "DEFAULT_LOOP_TIME": "integrations.github.tools.ci_analytics.loop",
     "LoopCard": "integrations.github.tools.ci_analytics.loop",
     "ScheduledLoop": "integrations.github.tools.ci_analytics.loop",
@@ -101,7 +103,9 @@ if TYPE_CHECKING:
         report_looks_complete,
         schedule_ci_reliability_loop,
     )
-    from integrations.github.tools.ci_analytics.render import ci_report_headline, render_ci_report
+    from integrations.github.tools.ci_analytics.render import ci_report_headline
+    from integrations.github.tools.ci_fix.ledger import count_ci_fixes, get_ci_fix_counter
+    from integrations.github.tools.ci_repair_loop.worker import run_ci_repair_worker
 
 
 __all__ = [
@@ -126,18 +130,20 @@ __all__ = [
     "authorize_github_via_device_flow",
     "build_github_mcp_config",
     "ci_report_headline",
+    "count_ci_fixes",
     "disconnect_personal_github",
     "format_github_mcp_validation_cli_report",
+    "get_ci_fix_counter",
     "github_creds",
     "github_integration_is_configured",
     "local_timezone",
     "loop_card",
     "open_pull_request",
     "print_github_mcp_validation_report",
-    "render_ci_report",
     "report_looks_complete",
     "resolve_github_token",
     "resolve_repo_scope",
+    "run_ci_repair_worker",
     "saved_github_username",
     "schedule_ci_reliability_loop",
     "validate_github_mcp_config",

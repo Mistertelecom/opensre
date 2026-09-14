@@ -5,7 +5,7 @@ Use this checklist whenever you add or materially change:
 - a tool — under `integrations/<vendor>/tools/` for a single-vendor tool, or `tools/system/` / `tools/cross_vendor/` for a cross-cutting one (see [tool-placement-policy.md](tool-placement-policy.md))
 - an integration under `integrations/<name>/` — its config, client, verifier, and tools
 
-This is the detailed definition of done; use it with [AGENTS.md](../AGENTS.md) and [CI.md](../CI.md).
+This is the detailed definition of done; use it with [AGENTS.md](https://github.com/Tracer-Cloud/opensre/blob/main/AGENTS.md) and [CI.md](https://github.com/Tracer-Cloud/opensre/blob/main/CI.md).
 
 ## 1. Tool checklist
 
@@ -99,7 +99,7 @@ disable-model-invocation: false   # optional — set true to suppress attachment
 ### Files usually involved
 
 - `integrations/<name>/__init__.py` — package facade: a docstring, plus re-exports of the
-  public API when callers need them (see the `__init__.py` rule in [AGENTS.md](../AGENTS.md))
+  public API when callers need them (see the `__init__.py` rule in [AGENTS.md](https://github.com/Tracer-Cloud/opensre/blob/main/AGENTS.md))
 - `integrations/<name>/config.py` — config model, `classify()`, validators, selectors,
   normalization helpers
 - `integrations/<name>/client.py` — a dedicated API client, when the integration makes direct remote calls
@@ -187,10 +187,10 @@ Everything above is complete, **and**:
 
 - [ ] Screenshot or demo GIF showing the integration working end-to-end
 - [ ] E2E test added
-- [ ] CI checks pass (see [CI.md](../CI.md))
+- [ ] CI checks pass (see [CI.md](https://github.com/Tracer-Cloud/opensre/blob/main/CI.md))
 
 ## 5. Reviewer focus
 
 Before opening or approving the PR, confirm the items most often missed are handled **explicitly**: tool placement (§1), live-payload robustness (§1), onboarding/setup/docs parity (§2 and §4), pagination/truncation/partial-response behavior (§3), and tests that cover realistic payloads and usefulness to the agent — not only happy-path mocks (§4).
 
-Follow [CI.md](../CI.md) for the mandatory pre-push commands.
+Follow [CI.md](https://github.com/Tracer-Cloud/opensre/blob/main/CI.md) for the mandatory pre-push commands.

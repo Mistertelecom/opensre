@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.agent_harness.prompts.skills.loader import load_skill_body
+from core.agent_harness.prompts.skills import load_skill_body
 from tools.interactive_shell.actions.skill_view import (
     execute_skill_view_tool,
     skill_view_tool,
@@ -31,7 +31,6 @@ def test_skill_view_unknown_name_lists_available() -> None:
 
 class _SessionStub:
     active_skill: str | None = None
-    active_skill_tools: tuple[str, ...] = ()
 
 
 class _CtxStub:
@@ -42,7 +41,7 @@ class _CtxStub:
 def test_skill_view_reference_loads_without_reentering_skill() -> None:
     ctx = _CtxStub()
     result = execute_skill_view_tool(
-        {"name": "cicd-analytics-demo", "reference": "metrics"},
+        {"name": "analyzing-github-ci-performance", "reference": "metrics"},
         ctx,  # type: ignore[arg-type]
     )
     assert result["ok"] is True
@@ -55,7 +54,7 @@ def test_skill_view_reference_loads_without_reentering_skill() -> None:
 
 def test_skill_view_unknown_reference_lists_available_references() -> None:
     result = execute_skill_view_tool(
-        {"name": "cicd-analytics-demo", "reference": "no-such-reference"},
+        {"name": "analyzing-github-ci-performance", "reference": "no-such-reference"},
         ctx=None,  # type: ignore[arg-type]
     )
     assert result["ok"] is False

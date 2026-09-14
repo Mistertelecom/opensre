@@ -16,9 +16,7 @@ import tools.system.workspace_git_scan.tool as scan_tool
 from config.constants.skills import ONBOARDING_SKILL_NAME, SKIP_DEMO_OPTION
 from core.agent_harness.prompts.action.assemble import build_action_system_prompt_envelope
 from core.agent_harness.prompts.getting_started import GETTING_STARTED_OPTIONS
-from core.agent_harness.prompts.skills import list_action_skills
 from core.agent_harness.session.pending_choice import (
-    AskUserQuestion,
     PendingUserChoice,
     format_ask_user_answers,
 )
@@ -35,10 +33,8 @@ from tools.system.workspace_git_scan.scan import WorkspaceSnapshot
 _TITLE = "Which demo would you like me to run?"
 _REPOSITORY_TITLE = "Which repository should I analyze?"
 _REPOSITORY = "acme/one"
-_NOTE = (
-    "Choose a demo using your own repositories or connect your team through Slack. "
-    "The managed-service option is coming soon."
-)
+_REPOSITORY_OPTIONS = (_REPOSITORY, "Tracer-Cloud/opensre")
+_NOTE = ""
 
 
 def _offerable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,19 +43,52 @@ def _offerable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(demo_picker, "capture_onboarding_demo_prompted", lambda: None)
     monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: True)
     monkeypatch.setattr(slash_adapter, "repl_tty_interactive", lambda: True)
-    # A repository demo asks for the repository in the shell; no scan in tests.
-    monkeypatch.setattr(choice_prompt, "choose_demo_repository", lambda _c, _q: _REPOSITORY)
-
-
-def _demo_with_repository(pending: PendingUserChoice, answer: str) -> str:
-    """The message the model receives: the demo pick, then the repository the shell asked for."""
-    repository = AskUserQuestion(label="", title=_REPOSITORY_TITLE, options=(_REPOSITORY,))
-    return format_ask_user_answers((*pending.items(), repository), (answer, _REPOSITORY))
 
 
 def _take_prompt(session: Session) -> str:
     assert session.terminal.pop_pending_autosubmit()
     return session.terminal.pop_pending_prompt_default()
+
+
+@pytest.mark.parametrize("selection", [SKIP_DEMO_OPTION, None], ids=["skip", "escape"])
+def test_demo_request_after_abandoning_startup_reopens_the_menu(
+    monkeypatch: pytest.MonkeyPatch, selection: str | None
+) -> None:
+    _offerable(monkeypatch)
+    session = Session()
+    session.resolved_integrations_cache = {}
+    session.skills_already_prompted.add("another-skill")
+    session.questions_already_answered.add("another question?")
+    console = Console(file=io.StringIO(), highlight=False)
+    llm = FakeActionLLM([tool_response("skill_view", {"name": ONBOARDING_SKILL_NAME})])
+
+    def pick(**_kwargs: Any) -> str | None:
+        return selection
+
+    monkeypatch.setattr(choice_prompt, "repl_choose_one", pick)
+    monkeypatch.setattr(choice_prompt, "capture_onboarding_choice", lambda *_a, **_k: None)
+    assert demo_picker.offer_demo(session, console)
+    session.terminal.exclusive_stdin_active = True
+    run_action_tool_turn(
+        _take_prompt(session), session, console, is_tty=True, llm_factory=lambda: llm
+    )
+    session.terminal.exclusive_stdin_active = False
+    assert llm.invocations == 0
+    assert session.active_skill is None
+    assert session.pending_user_choice is None
+    assert not session.terminal.pending_prompt_default
+
+    run_action_tool_turn(
+        "can you do a demo", session, console, is_tty=True, llm_factory=lambda: llm
+    )
+
+    pending = session.pending_user_choice
+    assert pending is not None, "A later demo request must reopen the abandoned startup menu"
+    assert pending.title == _TITLE
+    assert _take_prompt(session) == "/choose"
+    assert llm.invocations == 1
+    assert session.questions_already_answered == {"another question?"}
+    assert session.skills_already_prompted == {"another-skill", ONBOARDING_SKILL_NAME}
 
 
 @pytest.fixture
@@ -89,8 +118,12 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
     console = Console(file=buffer, highlight=False)
     llm = FakeActionLLM(
         [
-            tool_response("skill_view", {"name": "cicd-analytics-demo"}),
+            tool_response("skill_view", {"name": "analyzing-github-ci-performance"}),
             tool_response("scan_local_git_workspace"),
+            tool_response(
+                "ask_user_choice",
+                {"title": _REPOSITORY_TITLE, "options": list(_REPOSITORY_OPTIONS)},
+            ),
         ]
     )
     scans: list[str] = []
@@ -102,17 +135,10 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
 
     def pick(**kwargs: Any) -> str:
         picker_calls.append(kwargs)
-        return GETTING_STARTED_OPTIONS[0]
-
-    asked: list[str] = []
-
-    def choose_repository(_console: Any, question: str) -> str:
-        asked.append(question)
-        return _REPOSITORY
+        return _REPOSITORY if kwargs["title"] == _REPOSITORY_TITLE else GETTING_STARTED_OPTIONS[0]
 
     monkeypatch.setattr(scan_tool, "scan_workspace", scan)
     monkeypatch.setattr(choice_prompt, "repl_choose_one", pick)
-    monkeypatch.setattr(choice_prompt, "choose_demo_repository", choose_repository)
     assert demo_picker.offer_demo(session, console)
     # The host asked the skill's question itself: no prose prompt, no model, no output.
     assert buffer.getvalue() == ""
@@ -134,12 +160,11 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
     )
     session.terminal.exclusive_stdin_active = False
     assert llm.invocations == 0  # Nothing before the pick used the model.
-    # The shell asked the repository in the same turn; the card with both
-    # answers is painted when the answer is echoed. Nothing else: no work-turn
-    # marker, no skill tree.
-    assert asked == [_REPOSITORY_TITLE]
+    # The analytics skill leaves repository selection to the model's next turn.
     painted = buffer.getvalue()
-    for chrome in ("Ask User", "/goal", "Skill ", "activated", "skill_view", "[1]"):
+    assert _TITLE in painted
+    assert _REPOSITORY_TITLE not in painted
+    for chrome in ("/goal", "Skill ", "activated", "skill_view", "[1]"):
         assert chrome not in painted, painted
     assert len(picker_calls) == 1
     assert callable(picker_calls[0].pop("on_custom_answer"))
@@ -157,7 +182,7 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
     }
     assert session.active_skill == ONBOARDING_SKILL_NAME
     answer = _take_prompt(session)
-    assert answer == _demo_with_repository(pending, GETTING_STARTED_OPTIONS[0])
+    assert answer == format_ask_user_answers(pending.items(), (GETTING_STARTED_OPTIONS[0],))
     envelope = build_action_system_prompt_envelope(
         TurnSnapshot.from_session(answer, session, surface="interactive_shell")
     )
@@ -166,13 +191,40 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
 
     run_action_tool_turn(answer, session, console, is_tty=True, llm_factory=lambda: llm)
     assert len(scans) == 1
-    assert session.active_skill == "cicd-analytics-demo"
-    # The repository was answered in the shell; a scan the model runs anyway
-    # does not reopen that question, so the turn runs on to its end.
-    assert session.pending_user_choice is None
+    assert session.active_skill == "analyzing-github-ci-performance"
+    assert session.pending_user_choice is not None, buffer.getvalue()
+    assert session.pending_user_choice.title == _REPOSITORY_TITLE
+    assert session.pending_user_choice.options == _REPOSITORY_OPTIONS
     assert llm.invocations == 3
-    assert "analyze_github_ci_reliability" in session.active_skill_tools
+    # Raw-data analysis retains the full catalog for model-selected collection.
     assert onboarding_outcomes == [("ci_analytics", False)]
+
+    # An explicit new demo may ask the child's repository question again,
+    # while unrelated answered questions remain settled.
+    choice_prompt._cmd_choose(session, console, [])
+    _take_prompt(session)
+    session.questions_already_answered.add("deploy to production?")
+    assert demo_picker.offer_demo(session, console, force=True)
+    _take_prompt(session)
+    choice_prompt._cmd_choose(session, console, [])
+    replay_answer = _take_prompt(session)
+    replay_llm = FakeActionLLM(
+        [
+            tool_response("skill_view", {"name": "analyzing-github-ci-performance"}),
+            tool_response("scan_local_git_workspace"),
+            tool_response(
+                "ask_user_choice",
+                {"title": _REPOSITORY_TITLE, "options": list(_REPOSITORY_OPTIONS)},
+            ),
+        ]
+    )
+    run_action_tool_turn(
+        replay_answer, session, console, is_tty=True, llm_factory=lambda: replay_llm
+    )
+    assert len(scans) == 2
+    assert session.pending_user_choice is not None
+    assert session.pending_user_choice.title == _REPOSITORY_TITLE
+    assert "deploy to production?" in session.questions_already_answered
 
 
 @pytest.mark.parametrize("answer", [None, "Inspect the deployment logs", "/help"])
@@ -201,7 +253,6 @@ def test_onboarding_cancel_custom_and_slash_do_not_reopen_the_menu(
         assert _take_prompt(session) == answer
     else:
         assert _take_prompt(session) == format_ask_user_answers(pending.items(), (answer,))
-        assert session.active_skill_tools == ()  # Custom requests have the full tool catalog.
 
 
 def test_onboarding_outcomes_keep_stable_ids_and_exclude_child_menus(
@@ -225,14 +276,13 @@ def test_onboarding_outcomes_keep_stable_ids_and_exclude_child_menus(
         )
         choice_prompt._cmd_choose(session, console, [])
 
-    session.active_skill = "cicd-analytics-demo"
+    session.active_skill = "analyzing-github-ci-performance"
     session.pending_user_choice = PendingUserChoice(title="Repository?", options=("acme/one",))
     answer = "acme/one"
     choice_prompt._cmd_choose(session, console, [])
     assert onboarding_outcomes == [
         ("ci_analytics", False),
         ("ci_agent", False),
-        ("remote_managed_service", False),
         ("slack", False),
     ]
 
@@ -253,7 +303,7 @@ def test_onboarding_telemetry_failure_does_not_lose_the_answer(
     monkeypatch.setattr(onboarding_telemetry, "capture_onboarding_demo_selected", fail_capture)
     monkeypatch.setattr(choice_prompt, "repl_choose_one", lambda **_kw: answer)
     choice_prompt._cmd_choose(session, Console(file=io.StringIO()), [])
-    assert _take_prompt(session) == _demo_with_repository(pending, answer)
+    assert _take_prompt(session) == format_ask_user_answers(pending.items(), (answer,))
     assert session.active_skill == ONBOARDING_SKILL_NAME
 
 
@@ -281,7 +331,7 @@ def test_typed_option_label_keeps_its_custom_source_through_the_picker(
     monkeypatch.setattr(choice_menu, "leave_inline_menu", lambda: None)
     monkeypatch.setattr(cpr_stdin, "drain_stale_cpr_bytes", lambda: None)
     choice_prompt._cmd_choose(session, Console(file=io.StringIO()), [])
-    assert _take_prompt(session) == _demo_with_repository(pending, answer)
+    assert _take_prompt(session) == format_ask_user_answers(pending.items(), (answer,))
     assert onboarding_outcomes == [("custom", True) if typed else ("ci_analytics", False)]
 
 
@@ -310,14 +360,14 @@ def test_startup_and_demo_respect_tty_and_pending_input(monkeypatch: pytest.Monk
 def test_model_load_of_the_master_skill_opens_the_menu_and_ends_the_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mid-session "what can you do?" needs one model step, not a second one for the menu."""
+    """An explicit demo request loads the skill and lets its hook open the menu."""
     _offerable(monkeypatch)
     session = Session()
     session.resolved_integrations_cache = {}
     console = Console(file=io.StringIO(), highlight=False)
     llm = FakeActionLLM([tool_response("skill_view", {"name": ONBOARDING_SKILL_NAME})])
 
-    run_action_tool_turn("What can you do?", session, console, is_tty=True, llm_factory=lambda: llm)
+    run_action_tool_turn("Show me a demo", session, console, is_tty=True, llm_factory=lambda: llm)
 
     assert llm.invocations == 1
     assert session.active_skill == ONBOARDING_SKILL_NAME
@@ -342,20 +392,22 @@ def test_startup_without_a_menu_hook_does_not_fall_back_to_a_model_turn(
     assert session.active_skill is None
 
 
-def test_demo_skills_keep_their_tool_contracts_after_moving() -> None:
-    by_name = {skill.name: skill for skill in list_action_skills()}
-    assert by_name["cicd-analytics-demo"].tools == (
-        "scan_local_git_workspace",
-        "analyze_github_ci_reliability",
-        "schedule_ci_reliability_loop",
-        "cli_exec",
-        "slash_invoke",
-        "ask_user_choice",
-    )
-    assert by_name["cicd-reliability-agent"].tools == (
-        "scan_local_git_workspace",
-        "analyze_github_ci_reliability",
-        "schedule_ci_reliability_loop",
-        "ask_user_choice",
-    )
-    assert by_name["slack-handoff"].tools == ("cli_exec", "slash_invoke")
+def test_onboarding_losing_its_terminal_ends_without_a_text_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _offerable(monkeypatch)
+    session = Session()
+    output = io.StringIO()
+    console = Console(file=output)
+    assert demo_picker.offer_demo(session, console)
+    _take_prompt(session)
+    monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: False)
+
+    choice_prompt._cmd_choose(session, console, [])
+
+    assert "request a task directly" in output.getvalue()
+    assert all(option not in output.getvalue() for option in GETTING_STARTED_OPTIONS)
+    assert session.active_skill is None
+    assert session.pending_user_choice is None
+    assert not session.terminal.awaiting_handoff_answer
+    assert not session.terminal.pending_prompt_default

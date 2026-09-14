@@ -14,46 +14,50 @@ from datetime import date
 from types import MappingProxyType
 
 WINDOW_DAYS = 30
-MEASURED_ON = date(2026, 9, 9)
+MEASURED_ON = date(2026, 9, 11)
 
 
 @dataclass(frozen=True)
 class Benchmark:
-    """One well-known repository's figures, as measured on :data:`MEASURED_ON`."""
+    """One well-known repository's figures, as measured on :data:`MEASURED_ON`.
 
-    owner: str
-    repo: str
+    ``label`` is the ``owner/repo`` slug; ``owner`` and ``repo`` are derived from it.
+    """
+
+    label: str
     figures: Mapping[str, str]
 
     @property
-    def label(self) -> str:
-        return f"{self.owner}/{self.repo}"
+    def owner(self) -> str:
+        return self.label.partition("/")[0]
+
+    @property
+    def repo(self) -> str:
+        return self.label.partition("/")[2]
 
 
 BENCHMARKS: tuple[Benchmark, ...] = (
     Benchmark(
-        owner="apache",
-        repo="airflow",
+        label="langchain-ai/langchain",
         figures=MappingProxyType(
             {
-                "Red time on main": "3.4%",
-                "Mean time to green": "6.1h",
-                "CI-caused failure rate": "4.3%",
-                "Slowest normal run": "105m",
-                "PR failure rate": "25.4%",
+                "Red time on main": "7.5%",
+                "Mean time to green": "9.0h",
+                "CI-caused failure rate": "1.9%",
+                "Slowest normal run": "4m",
+                "PR failure rate": "11.5%",
             }
         ),
     ),
     Benchmark(
-        owner="fastapi",
-        repo="fastapi",
+        label="anomalyco/opencode",
         figures=MappingProxyType(
             {
-                "Red time on main": "0.0%",
-                "Mean time to green": "n/a",
-                "CI-caused failure rate": "0.0%",
-                "Slowest normal run": "5m",
-                "PR failure rate": "19.1%",
+                "Red time on main": "31.6%",
+                "Mean time to green": "4.3h",
+                "CI-caused failure rate": "1.6%",
+                "Slowest normal run": "20m",
+                "PR failure rate": "54.6%",
             }
         ),
     ),

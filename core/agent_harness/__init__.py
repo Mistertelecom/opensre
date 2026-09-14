@@ -20,8 +20,8 @@ from core.agent_harness.prompts.proactive_messages import (
     ProactiveMessagePolicy,
     load_master_judgement,
 )
-from core.agent_harness.prompts.skills.naming import is_legacy_skill_name, normalize_skill_name
-from core.agent_harness.prompts.skills.schedule import (
+from core.agent_harness.prompts.skills import is_legacy_skill_name, normalize_skill_name
+from core.agent_harness.prompts.skills.scheduling import (
     is_recurring_skill,
     pin_recurring_skill,
     resolve_scheduled_skill,
