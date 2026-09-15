@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 
 import pytest
 from rich.console import Console
@@ -79,11 +80,16 @@ def test_selection_analytics_links_rendered_prompt_to_chosen_option(
     console, _buf = _console()
     rendered: list[dict[str, object]] = []
     answered: list[dict[str, object]] = []
+
+    def pick(*, on_answer: Callable[[tuple[int, ...], str | None], None], **_kwargs: object) -> str:
+        on_answer((1,), None)
+        return "Commit the changes"
+
     monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: True)
     monkeypatch.setattr(
         choice_prompt,
         "repl_choose_one",
-        lambda **_kwargs: "Commit the changes",
+        pick,
     )
     monkeypatch.setattr(
         choice_prompt,
@@ -100,7 +106,8 @@ def test_selection_analytics_links_rendered_prompt_to_chosen_option(
 
     assert rendered[0]["interaction_id"] == answered[0]["interaction_id"]
     assert rendered[0]["render_mode"] == "picker"
-    assert answered[0]["answers"] == ("Commit the changes",)
+    assert answered[0]["selected_option_indices"] == [(1,)]
+    assert answered[0]["custom_answers"] == [None]
     assert answered[0]["disposition"] == "agent_answer"
 
 
@@ -243,7 +250,7 @@ def test_batch_answers_are_auto_submitted_as_qa_block(
     )
 
     monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: True)
-    monkeypatch.setattr(choice_prompt, "repl_ask_user", lambda _questions: answers)
+    monkeypatch.setattr(choice_prompt, "repl_ask_user", lambda _questions, **_kw: answers)
     monkeypatch.setattr(
         choice_prompt,
         "repl_choose_one",
@@ -272,7 +279,7 @@ def test_batch_custom_option_is_captured_inline_and_auto_submitted(
     )
 
     monkeypatch.setattr(choice_prompt, "repl_tty_interactive", lambda: True)
-    monkeypatch.setattr(choice_prompt, "repl_ask_user", lambda _questions: answers)
+    monkeypatch.setattr(choice_prompt, "repl_ask_user", lambda _questions, **_kw: answers)
 
     assert _handler(session, console) is True
     assert session.terminal.pending_prompt_autosubmit is True

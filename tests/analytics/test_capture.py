@@ -271,8 +271,8 @@ def test_capture_ask_user_events_link_redacted_prompt_and_selected_option(
     )
     capture.capture_ask_user_prompt_answered(
         interaction_id="prompt-1",
-        questions=questions,
-        answers=("Read only",),
+        selected_option_indices=((0,),),
+        custom_answers=(None,),
         disposition="agent_answer",
         skill_name="triage",
     )
@@ -299,28 +299,19 @@ def test_capture_ask_user_answered_keeps_bounded_custom_text(
 ) -> None:
     stub = _StubAnalytics()
     monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-    questions = [
-        {
-            "label": "Owner",
-            "title": "Who owns this service?",
-            "options": ["Platform", "Payments"],
-            "multi_select": False,
-        }
-    ]
-
     capture.capture_ask_user_prompt_answered(
         interaction_id="prompt-2",
-        questions=questions,
-        answers=("Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890",),
+        selected_option_indices=((1,),),
+        custom_answers=("Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890",),
         disposition="agent_answer",
         skill_name=None,
-        explicit_custom=True,
     )
 
     answered = stub.events[0][1]
     assert answered is not None
     detail = answered["answers"][0]
     assert detail["custom"] is True
+    assert detail["selected_option_indices"] == [1]
     assert "ghp_" not in str(detail["answer"])
     assert "[REDACTED:github_pat]" in str(detail["answer"])
 

@@ -118,11 +118,18 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
 
     items = pending.items()
     skill_name = session.active_skill
+    selected_indices: list[tuple[int, ...]] = [() for _ in items]
+    custom_answers: list[str | None] = [None for _ in items]
+
+    def remember_answer(index: int, indices: tuple[int, ...], custom: str | None) -> None:
+        selected_indices[index] = indices
+        custom_answers[index] = custom
+
     _capture_prompt_rendered(session, pending, render_mode="picker")
     clear_live_prompt_paint(session)
     play_notification(NotifyEvent.INPUT_NEEDED)  # the agent is now waiting on the user
     if pending.is_batch():
-        picked = repl_ask_user(items)
+        picked = repl_ask_user(items, on_answer=remember_answer)
         if picked is None:
             capture_ask_user_prompt_dismissed(
                 interaction_id=pending.interaction_id,
@@ -133,8 +140,8 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
             return True
         capture_ask_user_prompt_answered(
             interaction_id=pending.interaction_id,
-            questions=_analytics_questions(pending),
-            answers=picked,
+            selected_option_indices=selected_indices,
+            custom_answers=custom_answers,
             disposition="agent_answer",
             skill_name=skill_name,
         )
@@ -153,6 +160,9 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
         nonlocal custom_answer
         custom_answer = True
 
+    def remember_single_answer(indices: tuple[int, ...], custom: str | None) -> None:
+        remember_answer(0, indices, custom)
+
     # Custom row: type in place on the OpenSRE option array (Droid-style).
     picked_one = repl_choose_one(
         title=items[0].title,
@@ -163,6 +173,7 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
         letter_keys=True,
         note=pending.note,
         on_custom_answer=mark_custom_answer,
+        on_answer=remember_single_answer,
     )
     capture_onboarding_choice(session.active_skill, picked_one, custom=custom_answer)
     if picked_one is None:
@@ -182,11 +193,10 @@ def _cmd_choose(session: Session, console: Console, args: list[str]) -> bool:
         disposition = "agent_answer"
     capture_ask_user_prompt_answered(
         interaction_id=pending.interaction_id,
-        questions=_analytics_questions(pending),
-        answers=(picked_one,),
+        selected_option_indices=selected_indices,
+        custom_answers=custom_answers,
         disposition=disposition,
         skill_name=skill_name,
-        explicit_custom=custom_answer,
     )
     if picked_one == SKIP_DEMO_OPTION:
         # A shell decision, not an answer for the model: the demo is over.

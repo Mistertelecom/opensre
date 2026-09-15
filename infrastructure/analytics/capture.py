@@ -391,41 +391,32 @@ def capture_ask_user_prompt_rendered(
 def capture_ask_user_prompt_answered(
     *,
     interaction_id: str,
-    questions: Sequence[Mapping[str, object]],
-    answers: Sequence[str],
+    selected_option_indices: Sequence[Sequence[int]],
+    custom_answers: Sequence[str | None],
     disposition: str,
     skill_name: str | None,
-    explicit_custom: bool = False,
 ) -> None:
     """Record listed/custom options selected from a rendered Ask User prompt."""
-    sanitized_questions = _ask_user_questions(questions)
     answer_details: list[JsonValue] = []
-    for index, (question, answer) in enumerate(zip(sanitized_questions, answers, strict=False)):
-        options = question["options"]
-        option_values = options if isinstance(options, list) else []
-        selected_values = [
-            _bounded_redacted_text(part, max_chars=_ASK_USER_OPTION_MAX_CHARS)
-            for part in answer.splitlines()
-            if part.strip()
-        ]
-        selected_indices: list[JsonValue] = [
-            option_values.index(value) for value in selected_values if value in option_values
-        ]
-        is_custom = explicit_custom or len(selected_indices) != len(selected_values)
+    for index, (indices, custom_answer) in enumerate(
+        zip(selected_option_indices, custom_answers, strict=True)
+    ):
         detail: dict[str, JsonValue] = {
             "question_index": index,
-            "selected_option_indices": selected_indices,
-            "custom": is_custom,
+            "selected_option_indices": list(indices),
+            "custom": custom_answer is not None,
         }
-        if is_custom:
-            detail["answer"] = _bounded_redacted_text(answer, max_chars=_ASK_USER_TITLE_MAX_CHARS)
+        if custom_answer is not None:
+            detail["answer"] = _bounded_redacted_text(
+                custom_answer, max_chars=_ASK_USER_TITLE_MAX_CHARS
+            )
         answer_details.append(detail)
     _capture(
         Event.ASK_USER_PROMPT_ANSWERED,
         _with_optional_skill(
             {
                 "interaction_id": interaction_id,
-                "question_count": len(sanitized_questions),
+                "question_count": len(answer_details),
                 "answers": answer_details,
                 "disposition": disposition,
             },

@@ -168,6 +168,7 @@ def test_boot_paints_only_the_skill_menu_then_selected_child_runs_through_real_t
         assert chrome not in painted, painted
     assert len(picker_calls) == 1
     assert callable(picker_calls[0].pop("on_custom_answer"))
+    assert callable(picker_calls[0].pop("on_answer"))
     assert picker_calls[0] == {
         "title": _TITLE,
         "choices": [

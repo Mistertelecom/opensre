@@ -378,6 +378,7 @@ def test_main_emits_first_run_install_before_cli_invoked(
     provider._cached_anonymous_id = None
     provider._cached_identity_persistence = "unknown"
     provider._first_run_marker_created_this_process = False
+    monkeypatch.setattr(provider, "_install_capture_attempted", False)
     provider._pending_user_id_load_failures.clear()
     monkeypatch.delenv("OPENSRE_NO_TELEMETRY", raising=False)
     monkeypatch.delenv("OPENSRE_ANALYTICS_DISABLED", raising=False)
