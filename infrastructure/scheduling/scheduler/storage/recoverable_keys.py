@@ -30,7 +30,9 @@ def get_recoverable_runs_for_scope(
 
     task_ids_json = json.dumps(sorted(set(eligible_task_ids))) if eligible_task_ids else None
     run_keys_json = (
-        json.dumps(sorted({(str(task_id), str(fire_time)) for task_id, fire_time in exact_run_keys}))
+        json.dumps(
+            sorted({(str(task_id), str(fire_time)) for task_id, fire_time in exact_run_keys})
+        )
         if exact_run_keys
         else None
     )
