@@ -221,7 +221,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         )
 
     def submit_job(self, job: Any, run_times: list[datetime]) -> None:
-        """Persist first, then submit only when a bounded user slot is available."""
+        """Persist first, then route durable draining away from admission."""
         if not self._durable_dispatch:
             super().submit_job(job, run_times)
             return
@@ -247,13 +247,21 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._request_drain()
                 raise MaxInstancesReachedError(job)
 
-        if self.in_memory_user_callbacks >= self._max_user_workers:
-            self._emit_state("saturated")
+        # Compatibility hooks that do not persist the submitted fire time must
+        # still execute their own callback regardless of unrelated durable work.
+        if not _submission_is_durable(job.id, run_times):
+            if self.in_memory_user_callbacks >= self._max_user_workers:
+                self._emit_state("saturated")
+                return
+            self._submit_direct_fallback(job, run_times)
             return
 
-        # Prefer the oldest durable candidate. The direct fallback exists only
-        # for custom/test hooks that did not persist the submitted fire times.
-        self._fill_capacity(fallback=(job, run_times))
+        # Durable recovery may scan historical rows until M2 indexes are in the
+        # same revision. Keep that work entirely on the independent control lane
+        # so scheduler admission remains bounded to persistence + wake-up.
+        self._request_drain()
+        if self.in_memory_user_callbacks >= self._max_user_workers:
+            self._emit_state("saturated")
 
     def _do_submit_job(self, job: Any, run_times: list[datetime]) -> None:
         """Legacy path used when durable dispatch is unavailable."""
@@ -312,7 +320,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             except Exception:  # noqa: BLE001 - control wake must survive storage failures
                 logger.warning("Scheduled durable dispatch cycle failed", exc_info=True)
 
-    def _fill_capacity(self, fallback: tuple[Any, list[datetime]] | None = None) -> None:
+    def _fill_capacity(self) -> None:
         """Fill free user slots from durable work in admission order.
 
         The durable query is repeated after each successful reservation with the
@@ -351,11 +359,6 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 # not spin. A later completion/recovery wake will retry.
                 if not submitted_this_pass:
                     break
-
-            if dispatched == 0 and fallback is not None:
-                job, run_times = fallback
-                if not _submission_is_durable(job.id, run_times):
-                    self._submit_direct_fallback(job, run_times)
 
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
