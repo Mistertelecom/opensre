@@ -44,7 +44,10 @@ def _job(task_id: str, runners: object) -> SimpleNamespace:
     )
 
 
-def _silence_observability(monkeypatch: pytest.MonkeyPatch, pending: list[SimpleNamespace]) -> None:
+def _silence_observability(
+    monkeypatch: pytest.MonkeyPatch,
+    pending: list[SimpleNamespace],
+) -> None:
     monkeypatch.setattr(scheduler_executor, "_task_is_enabled", lambda _task_id: True)
     monkeypatch.setattr(
         scheduler_executor,
@@ -54,7 +57,11 @@ def _silence_observability(monkeypatch: pytest.MonkeyPatch, pending: list[Simple
             oldest_pending_age_seconds=0.0 if pending else None,
         ),
     )
-    monkeypatch.setattr(scheduler_executor, "_record_backlog_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def test_resync_removed_recurring_job_is_not_drained_by_old_filtered_scheduler(
@@ -74,11 +81,16 @@ def test_resync_removed_recurring_job_is_not_drained_by_old_filtered_scheduler(
     def on_submit(task_id: str, scheduled_run_time: datetime) -> None:
         with lock:
             pending.append(
-                SimpleNamespace(task_id=task_id, fire_time=scheduled_run_time.isoformat())
+                SimpleNamespace(
+                    task_id=task_id,
+                    fire_time=scheduled_run_time.isoformat(),
+                )
             )
 
     def recoverable_runs(
-        eligible_task_ids: set[str], *, limit: int
+        eligible_task_ids: set[str],
+        *,
+        limit: int,
     ) -> list[SimpleNamespace]:
         with lock:
             return [run for run in pending if run.task_id in eligible_task_ids][:limit]
@@ -127,17 +139,27 @@ def test_deep_same_task_prefix_does_not_hide_other_dispatchable_task(
     later = _job("task-b", runners)
     scheduler = _Scheduler([first, later])
     pending = [
-        SimpleNamespace(task_id=first.id, fire_time=f"2026-09-17T12:{index // 60:02d}:{index % 60:02d}Z")
+        SimpleNamespace(
+            task_id=first.id,
+            fire_time=f"2026-09-17T12:{index // 60:02d}:{index % 60:02d}Z",
+        )
         for index in range(1_000)
     ]
-    pending.append(SimpleNamespace(task_id=later.id, fire_time="2026-09-18T05:00:00Z"))
+    pending.append(
+        SimpleNamespace(
+            task_id=later.id,
+            fire_time="2026-09-18T05:00:00Z",
+        )
+    )
     lock = threading.Lock()
     both_started = threading.Event()
     release = threading.Event()
     started: list[str] = []
 
     def recoverable_runs(
-        eligible_task_ids: set[str], *, limit: int
+        eligible_task_ids: set[str],
+        *,
+        limit: int,
     ) -> list[SimpleNamespace]:
         with lock:
             return [run for run in pending if run.task_id in eligible_task_ids][:limit]
