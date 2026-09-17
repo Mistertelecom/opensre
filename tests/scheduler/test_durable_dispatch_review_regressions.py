@@ -246,11 +246,6 @@ def test_durable_disabled_tick_does_not_use_direct_fallback(
     monkeypatch.setattr(scheduler_executor, "_enabled_task_ids", set)
     monkeypatch.setattr(
         scheduler_executor,
-        "_submission_is_durable",
-        lambda _task_id, _run_times: True,
-    )
-    monkeypatch.setattr(
-        scheduler_executor,
         "_record_backlog_state",
         lambda *_args, **_kwargs: None,
     )
@@ -287,11 +282,6 @@ def test_durable_submission_scans_recovery_only_on_control_lane(
     scanned = threading.Event()
     scan_threads: list[str] = []
 
-    monkeypatch.setattr(
-        scheduler_executor,
-        "_submission_is_durable",
-        lambda _task_id, _run_times: True,
-    )
     monkeypatch.setattr(
         scheduler_executor,
         "_enabled_task_ids",
@@ -358,11 +348,6 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
 
     monkeypatch.setattr(
         scheduler_executor,
-        "_submission_is_durable",
-        lambda task_id, _run_times: task_id != fallback_job.id,
-    )
-    monkeypatch.setattr(
-        scheduler_executor,
         "_enabled_task_ids",
         lambda: {durable_job.id, fallback_job.id},
     )
@@ -395,6 +380,7 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
     executor = scheduler_executor.ScheduledThreadPoolExecutor(
         max_workers=2,
         on_submit=lambda *_args: None,
+        durable_on_submit=False,
     )
     executor.start(scheduler, "default")
     try:
