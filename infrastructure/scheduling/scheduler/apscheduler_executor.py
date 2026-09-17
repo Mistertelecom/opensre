@@ -125,6 +125,18 @@ def _record_backlog_state(
     )
 
 
+def _is_one_shot_job(job: Any) -> bool:
+    """Return whether APScheduler may remove this job immediately after submission.
+
+    Durable recurring scheduler tasks remain represented by their registered job,
+    which is also how filtered scheduler ownership is enforced after resync. Date
+    jobs are different: APScheduler removes them after their only fire, so an
+    admitted-but-not-yet-dispatched date tick needs a short-lived ownership hint.
+    """
+    trigger = getattr(job, "trigger", None)
+    return trigger is not None and trigger.__class__.__name__ == "DateTrigger"
+
+
 class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
     """Persist cron admissions and keep user execution strictly in-memory bounded.
 
@@ -160,7 +172,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         self._in_memory_user_callbacks = 0
         self._peak_in_memory_user_callbacks = 0
         self._active_task_ids: set[str] = set()
-        self._admitted_task_ids: set[str] = set()
+        self._one_shot_task_ids: set[str] = set()
         self._runners: Any | None = None
         self._last_backlog_state: str | None = None
         self._control_cycles = 0
@@ -207,7 +219,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._on_submit(job.id, scheduled_run_time)
 
         with self._dispatch_lock:
-            self._admitted_task_ids.add(job.id)
+            if _is_one_shot_job(job):
+                self._one_shot_task_ids.add(job.id)
             if len(job.args) >= 2:
                 self._runners = job.args[1]
 
@@ -284,7 +297,13 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 logger.warning("Scheduled durable dispatch cycle failed", exc_info=True)
 
     def _fill_capacity(self, fallback: tuple[Any, list[datetime]] | None = None) -> None:
-        """Fill free user slots from durable work in admission order."""
+        """Fill free user slots from durable work in admission order.
+
+        The durable query is repeated after each successful reservation with the
+        now-active task ids excluded from eligibility. This avoids a fixed-size
+        prefix of same-task rows hiding unrelated dispatchable work later in the
+        backlog while same-task exclusion is active.
+        """
         with self._pump_lock:
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
@@ -292,14 +311,30 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
             eligible_task_ids = self._eligible_task_ids()
             dispatched = 0
-            if eligible_task_ids:
-                limit = max(_RECOVERABLE_BATCH_MIN, self._max_user_workers * 32)
-                candidates = _recoverable_runs(eligible_task_ids, limit=limit)
+            limit = max(_RECOVERABLE_BATCH_MIN, self._max_user_workers * 32)
+
+            while self.in_memory_user_callbacks < self._max_user_workers:
+                with self._dispatch_lock:
+                    available_task_ids = eligible_task_ids - self._active_task_ids
+                if not available_task_ids:
+                    break
+
+                candidates = _recoverable_runs(available_task_ids, limit=limit)
+                if not candidates:
+                    break
+
+                submitted_this_pass = False
                 for run in candidates:
                     if self.in_memory_user_callbacks >= self._max_user_workers:
                         break
                     if self._submit_recoverable(run):
                         dispatched += 1
+                        submitted_this_pass = True
+
+                # If the query returned rows but none could reserve a slot, do
+                # not spin. A later completion/recovery wake will retry.
+                if not submitted_this_pass:
+                    break
 
             if dispatched == 0 and fallback is not None:
                 job, run_times = fallback
@@ -313,7 +348,14 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._emit_state("idle")
 
     def _eligible_task_ids(self) -> set[str]:
-        """Return enabled tasks owned by this scheduler instance/filter."""
+        """Return enabled tasks currently owned by this scheduler instance.
+
+        Recurring task ownership comes only from the scheduler's current job set.
+        Therefore a resync that removes a job because it no longer matches this
+        scheduler's task filter also removes it from durable dispatch eligibility.
+        Date jobs are retained separately because APScheduler removes them after
+        their one allowed fire even when their durable tick is still waiting.
+        """
         scheduler_ids: set[str] = set()
         try:
             for job in self._scheduler.get_jobs():
@@ -323,22 +365,22 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             logger.debug("Could not snapshot registered scheduler jobs", exc_info=True)
 
         with self._dispatch_lock:
-            candidate_ids = scheduler_ids | self._admitted_task_ids
+            candidate_ids = scheduler_ids | self._one_shot_task_ids
 
         eligible: set[str] = set()
-        stale: set[str] = set()
+        stale_one_shots: set[str] = set()
         for task_id in candidate_ids:
             try:
                 if _task_is_enabled(task_id):
                     eligible.add(task_id)
-                elif task_id not in scheduler_ids:
-                    stale.add(task_id)
+                elif task_id in self._one_shot_task_ids:
+                    stale_one_shots.add(task_id)
             except Exception:  # noqa: BLE001 - task-store failure is retried on the next wake
                 logger.warning("Could not verify scheduled task %s for dispatch", task_id, exc_info=True)
 
-        if stale:
+        if stale_one_shots:
             with self._dispatch_lock:
-                self._admitted_task_ids.difference_update(stale)
+                self._one_shot_task_ids.difference_update(stale_one_shots)
         return eligible
 
     def _submit_recoverable(self, run: Any) -> bool:
