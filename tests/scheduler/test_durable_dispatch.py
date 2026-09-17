@@ -10,8 +10,7 @@ import pytest
 from apscheduler.executors.base import MaxInstancesReachedError
 from apscheduler.events import JobEvent
 
-import infrastructure.scheduling.scheduler.apscheduler_executor as scheduler_executor
-from infrastructure.scheduling.scheduler.apscheduler_executor import ScheduledThreadPoolExecutor
+from infrastructure.scheduling.scheduler import apscheduler_executor as scheduler_executor
 
 
 class _Scheduler:
@@ -44,8 +43,16 @@ def _job(task_id: str, runners: object) -> SimpleNamespace:
     )
 
 
-def _silence_backlog_events(monkeypatch: pytest.MonkeyPatch, pending: list[SimpleNamespace]) -> None:
-    monkeypatch.setattr(scheduler_executor, "_task_is_enabled", lambda _task_id: True)
+def _silence_backlog_events(
+    monkeypatch: pytest.MonkeyPatch,
+    pending: list[SimpleNamespace],
+    scheduler: _Scheduler,
+) -> None:
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_enabled_task_ids",
+        lambda: set(scheduler.jobs),
+    )
     monkeypatch.setattr(
         scheduler_executor,
         "_backlog_snapshot",
@@ -54,7 +61,11 @@ def _silence_backlog_events(monkeypatch: pytest.MonkeyPatch, pending: list[Simpl
             oldest_pending_age_seconds=0.0 if pending else None,
         ),
     )
-    monkeypatch.setattr(scheduler_executor, "_record_backlog_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def test_restart_recovery_drains_existing_backlog_without_new_admission(
@@ -65,7 +76,10 @@ def test_restart_recovery_drains_existing_backlog_without_new_admission(
     jobs = [_job(f"task-{index}", runners) for index in range(4)]
     scheduler = _Scheduler(jobs)
     pending = [
-        SimpleNamespace(task_id=job.id, fire_time=f"2026-09-17T12:00:0{index}Z")
+        SimpleNamespace(
+            task_id=job.id,
+            fire_time=f"2026-09-17T12:00:0{index}Z",
+        )
         for index, job in enumerate(jobs)
     ]
     lock = threading.Lock()
@@ -73,12 +87,17 @@ def test_restart_recovery_drains_existing_backlog_without_new_admission(
     all_done = threading.Event()
 
     def recoverable_runs(
-        eligible_task_ids: set[str], *, limit: int
+        eligible_task_ids: set[str],
+        *,
+        limit: int,
     ) -> list[SimpleNamespace]:
         with lock:
             return [run for run in pending if run.task_id in eligible_task_ids][:limit]
 
-    def execute_recoverable(run: SimpleNamespace, observed_runners: object) -> list[object]:
+    def execute_recoverable(
+        run: SimpleNamespace,
+        observed_runners: object,
+    ) -> list[object]:
         assert observed_runners is runners
         with lock:
             pending.remove(run)
@@ -89,9 +108,12 @@ def test_restart_recovery_drains_existing_backlog_without_new_admission(
 
     monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
     monkeypatch.setattr(scheduler_executor, "_execute_recoverable_run", execute_recoverable)
-    _silence_backlog_events(monkeypatch, pending)
+    _silence_backlog_events(monkeypatch, pending, scheduler)
 
-    executor = ScheduledThreadPoolExecutor(max_workers=2, on_submit=lambda *_args: None)
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=2,
+        on_submit=lambda *_args: None,
+    )
     executor.start(scheduler, "default")
     recovery_job = SimpleNamespace(id="scheduler-claim-recovery", max_instances=1)
     try:
@@ -100,7 +122,8 @@ def test_restart_recovery_drains_existing_backlog_without_new_admission(
     finally:
         executor.shutdown(wait=True)
 
-    assert executed == [job.id for job in jobs]
+    assert len(executed) == len(jobs)
+    assert set(executed) == {job.id for job in jobs}
     assert not pending
     assert executor.peak_in_memory_user_callbacks <= 2
 
@@ -122,11 +145,16 @@ def test_same_task_second_tick_is_durable_then_runs_after_first_finishes(
     def on_submit(task_id: str, scheduled_run_time: datetime) -> None:
         with lock:
             pending.append(
-                SimpleNamespace(task_id=task_id, fire_time=scheduled_run_time.isoformat())
+                SimpleNamespace(
+                    task_id=task_id,
+                    fire_time=scheduled_run_time.isoformat(),
+                )
             )
 
     def recoverable_runs(
-        eligible_task_ids: set[str], *, limit: int
+        eligible_task_ids: set[str],
+        *,
+        limit: int,
     ) -> list[SimpleNamespace]:
         with lock:
             return [run for run in pending if run.task_id in eligible_task_ids][:limit]
@@ -145,9 +173,12 @@ def test_same_task_second_tick_is_durable_then_runs_after_first_finishes(
 
     monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
     monkeypatch.setattr(scheduler_executor, "_execute_recoverable_run", execute_recoverable)
-    _silence_backlog_events(monkeypatch, pending)
+    _silence_backlog_events(monkeypatch, pending, scheduler)
 
-    executor = ScheduledThreadPoolExecutor(max_workers=1, on_submit=on_submit)
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=on_submit,
+    )
     executor.start(scheduler, "default")
     first = datetime.now(UTC)
     second = first + timedelta(seconds=1)

@@ -1,4 +1,4 @@
-"""Regressions for filtered ownership and deep same-task durable backlogs."""
+"""Regressions for filtered ownership, durable fallback, and backlog fairness."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 from apscheduler.events import JobEvent
 
-import infrastructure.scheduling.scheduler.apscheduler_executor as scheduler_executor
-from infrastructure.scheduling.scheduler.apscheduler_executor import ScheduledThreadPoolExecutor
+from infrastructure.scheduling.scheduler import (
+    apscheduler_executor as scheduler_executor,
+    runner,
+)
 
 
 class _Scheduler:
@@ -31,12 +33,17 @@ class _Scheduler:
         return self.jobs.get(job_id)
 
 
-def _job(task_id: str, runners: object) -> SimpleNamespace:
+def _job(
+    task_id: str,
+    runners: object,
+    *,
+    callback: object | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=task_id,
         max_instances=1,
         misfire_grace_time=None,
-        func=lambda **_kwargs: None,
+        func=callback or (lambda **_kwargs: None),
         args=(task_id, runners),
         kwargs={},
         _jobstore_alias="default",
@@ -47,8 +54,13 @@ def _job(task_id: str, runners: object) -> SimpleNamespace:
 def _silence_observability(
     monkeypatch: pytest.MonkeyPatch,
     pending: list[SimpleNamespace],
+    scheduler: _Scheduler,
 ) -> None:
-    monkeypatch.setattr(scheduler_executor, "_task_is_enabled", lambda _task_id: True)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_enabled_task_ids",
+        lambda: set(scheduler.jobs),
+    )
     monkeypatch.setattr(
         scheduler_executor,
         "_backlog_snapshot",
@@ -107,9 +119,12 @@ def test_resync_removed_recurring_job_is_not_drained_by_old_filtered_scheduler(
 
     monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
     monkeypatch.setattr(scheduler_executor, "_execute_recoverable_run", execute_recoverable)
-    _silence_observability(monkeypatch, pending)
+    _silence_observability(monkeypatch, pending, scheduler)
 
-    executor = ScheduledThreadPoolExecutor(max_workers=1, on_submit=on_submit)
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=on_submit,
+    )
     executor.start(scheduler, "default")
     now = datetime.now(UTC)
     try:
@@ -128,6 +143,143 @@ def test_resync_removed_recurring_job_is_not_drained_by_old_filtered_scheduler(
     finally:
         release_first.set()
         executor.shutdown(wait=True)
+
+
+def test_ownership_is_revalidated_at_reservation_after_candidate_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resync between eligibility and reservation prevents the stale dispatch."""
+    runners = object()
+    moved = _job("task-moved", runners)
+    scheduler = _Scheduler([moved])
+    run = SimpleNamespace(
+        task_id=moved.id,
+        fire_time="2026-09-17T12:00:00Z",
+    )
+    pending = [run]
+    executed = threading.Event()
+
+    def recoverable_runs(
+        eligible_task_ids: set[str],
+        *,
+        limit: int,
+    ) -> list[SimpleNamespace]:
+        assert moved.id in eligible_task_ids
+        scheduler.jobs.pop(moved.id, None)
+        return pending[:limit]
+
+    def execute_recoverable(
+        _run: SimpleNamespace,
+        _runners: object,
+    ) -> list[object]:
+        executed.set()
+        return []
+
+    monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
+    monkeypatch.setattr(scheduler_executor, "_execute_recoverable_run", execute_recoverable)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_enabled_task_ids",
+        lambda: {moved.id},
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_backlog_snapshot",
+        lambda _eligible: SimpleNamespace(
+            pending_count=1,
+            oldest_pending_age_seconds=0.0,
+        ),
+    )
+
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=lambda *_args: None,
+    )
+    executor.start(scheduler, "default")
+    try:
+        executor._fill_capacity()
+        assert not executed.is_set()
+        assert pending == [run]
+        assert executor.in_memory_user_callbacks == 0
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_eligibility_reads_task_store_once_per_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large ownership scan uses one task-store snapshot, not one read per ID."""
+    tasks = [
+        SimpleNamespace(id=f"task-{index}", enabled=index % 2 == 0)
+        for index in range(1_000)
+    ]
+    calls = 0
+
+    def list_tasks_once() -> list[SimpleNamespace]:
+        nonlocal calls
+        calls += 1
+        return tasks
+
+    monkeypatch.setattr(runner, "list_tasks", list_tasks_once)
+
+    enabled = scheduler_executor._enabled_task_ids()
+
+    assert calls == 1
+    assert len(enabled) == 500
+    assert "task-0" in enabled
+    assert "task-1" not in enabled
+
+
+def test_durable_disabled_tick_does_not_use_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted disabled tick stays durable instead of becoming SKIPPED."""
+    runners = object()
+    callback_started = threading.Event()
+
+    def callback(**_kwargs: object) -> None:
+        callback_started.set()
+
+    job = _job("task-disabled", runners, callback=callback)
+    scheduler = _Scheduler([job])
+
+    monkeypatch.setattr(scheduler_executor, "_enabled_task_ids", set)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_submission_is_durable",
+        lambda _task_id, _run_times: True,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_backlog_snapshot",
+        lambda _eligible: SimpleNamespace(
+            pending_count=1,
+            oldest_pending_age_seconds=0.0,
+        ),
+    )
+
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=lambda *_args: None,
+    )
+    executor.start(scheduler, "default")
+    try:
+        executor.submit_job(job, [datetime.now(UTC)])
+    finally:
+        executor.shutdown(wait=True)
+
+    assert not callback_started.is_set()
+    assert executor.peak_in_memory_user_callbacks == 0
 
 
 def test_deep_same_task_prefix_does_not_hide_other_dispatchable_task(
@@ -175,9 +327,12 @@ def test_deep_same_task_prefix_does_not_hide_other_dispatchable_task(
 
     monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
     monkeypatch.setattr(scheduler_executor, "_execute_recoverable_run", execute_recoverable)
-    _silence_observability(monkeypatch, pending)
+    _silence_observability(monkeypatch, pending, scheduler)
 
-    executor = ScheduledThreadPoolExecutor(max_workers=2, on_submit=lambda *_args: None)
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=2,
+        on_submit=lambda *_args: None,
+    )
     executor.start(scheduler, "default")
     recovery_job = SimpleNamespace(id="scheduler-claim-recovery", max_instances=1)
     try:

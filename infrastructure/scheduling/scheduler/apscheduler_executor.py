@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor as ControlThreadPoolExecutor
 from copy import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -52,12 +52,27 @@ def _recoverable_runs(
     return get_recoverable_runs(limit=limit, eligible_task_ids=eligible_task_ids)
 
 
-def _task_is_enabled(task_id: str) -> bool:
-    """Return whether the scheduler still considers a task executable."""
+def _enabled_task_ids() -> set[str]:
+    """Load the task store once and return every currently enabled task id."""
     from infrastructure.scheduling.scheduler import runner
 
-    task = runner.get_task(task_id)
-    return task is not None and task.enabled
+    return {task.id for task in runner.list_tasks() if task.enabled}
+
+
+def _submission_is_durable(job_id: str, run_times: Collection[datetime]) -> bool:
+    """Return whether every submitted fire time already has a durable run row.
+
+    This check is only used before the compatibility fallback. Production
+    admissions write the run row first; custom/test hooks that do not persist
+    anything can still use the direct APScheduler callback path.
+    """
+    from infrastructure.scheduling.scheduler.storage import get_latest_run_for_fire_time
+
+    for scheduled_run_time in run_times:
+        fire_time = scheduled_run_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if get_latest_run_for_fire_time(job_id, fire_time) is None:
+            return False
+    return True
 
 
 def _execute_recoverable_run(run: Any, runners: Any) -> list[Any]:
@@ -235,8 +250,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._emit_state("saturated")
             return
 
-        # Prefer the oldest durable candidate. The direct fallback exists for
-        # tests/custom executors whose on_submit hook does not write the run DB.
+        # Prefer the oldest durable candidate. The direct fallback exists only
+        # for custom/test hooks that did not persist the submitted fire times.
         self._fill_capacity(fallback=(job, run_times))
 
     def _do_submit_job(self, job: Any, run_times: list[datetime]) -> None:
@@ -338,7 +353,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
             if dispatched == 0 and fallback is not None:
                 job, run_times = fallback
-                self._submit_direct_fallback(job, run_times)
+                if not _submission_is_durable(job.id, run_times):
+                    self._submit_direct_fallback(job, run_times)
 
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
@@ -365,23 +381,21 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             logger.debug("Could not snapshot registered scheduler jobs", exc_info=True)
 
         with self._dispatch_lock:
-            candidate_ids = scheduler_ids | self._one_shot_task_ids
+            one_shot_ids = set(self._one_shot_task_ids)
+            candidate_ids = scheduler_ids | one_shot_ids
 
-        eligible: set[str] = set()
-        stale_one_shots: set[str] = set()
-        for task_id in candidate_ids:
-            try:
-                if _task_is_enabled(task_id):
-                    eligible.add(task_id)
-                elif task_id in self._one_shot_task_ids:
-                    stale_one_shots.add(task_id)
-            except Exception:  # noqa: BLE001 - task-store failure is retried on the next wake
-                logger.warning("Could not verify scheduled task %s for dispatch", task_id, exc_info=True)
+        try:
+            enabled_task_ids = _enabled_task_ids()
+        except Exception:  # noqa: BLE001 - task-store failure is retried on the next wake
+            logger.warning("Could not snapshot scheduled tasks for dispatch", exc_info=True)
+            return set()
 
+        stale_one_shots = one_shot_ids - enabled_task_ids
         if stale_one_shots:
             with self._dispatch_lock:
                 self._one_shot_task_ids.difference_update(stale_one_shots)
-        return eligible
+
+        return candidate_ids & enabled_task_ids
 
     def _submit_recoverable(self, run: Any) -> bool:
         """Reserve one user slot and execute an exact persisted fire-time key."""
@@ -391,10 +405,32 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 or run.task_id in self._active_task_ids
             ):
                 return False
-            runners = self._runners or self._runners_from_registered_job(run.task_id)
+
+            is_one_shot = run.task_id in self._one_shot_task_ids
+            registered_job: Any | None = None
+            if not is_one_shot:
+                try:
+                    registered_job = self._scheduler.get_job(run.task_id)
+                except Exception:  # noqa: BLE001 - ownership is retried on the next wake
+                    logger.debug(
+                        "Could not revalidate scheduler ownership for %s",
+                        run.task_id,
+                        exc_info=True,
+                    )
+                    return False
+                if registered_job is None:
+                    return False
+
+            runners = self._runners
+            if runners is None and registered_job is not None and len(registered_job.args) >= 2:
+                runners = registered_job.args[1]
+                self._runners = runners
+            if runners is None:
+                runners = self._runners_from_registered_job(run.task_id)
             if runners is None:
                 return False
-            max_instances = self._max_instances_for_task(run.task_id)
+
+            max_instances = int(registered_job.max_instances) if registered_job is not None else 1
             with self._lock:
                 if self._instances[run.task_id] >= max_instances:
                     return False
