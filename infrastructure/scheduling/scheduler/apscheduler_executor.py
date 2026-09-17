@@ -357,9 +357,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                     return
                 with self._dispatch_lock:
                     available_task_ids = (
-                        eligible_task_ids
-                        - self._active_task_ids
-                        - self._deferred_task_ids
+                        eligible_task_ids - self._active_task_ids - self._deferred_task_ids
                     )
                 if not available_task_ids:
                     break
