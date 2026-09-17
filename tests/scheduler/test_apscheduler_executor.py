@@ -326,3 +326,61 @@ def test_recovery_control_lane_runs_while_user_pool_is_saturated(
         executor.shutdown(wait=True)
 
     assert executor.peak_in_memory_user_callbacks == capacity
+
+
+def test_shutdown_does_not_join_control_lookup_blocked_on_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown cannot wait on control work that is blocked in scheduler lookup."""
+    scheduler = _DurableFakeScheduler()
+    lookup_started = threading.Event()
+    release_lookup = threading.Event()
+    lookup_returned = threading.Event()
+    control_exited = threading.Event()
+    shutdown_returned = threading.Event()
+    shutdown_errors: list[BaseException] = []
+
+    def blocked_get_jobs() -> list[SimpleNamespace]:
+        lookup_started.set()
+        assert release_lookup.wait(5)
+        lookup_returned.set()
+        return []
+
+    monkeypatch.setattr(scheduler, "get_jobs", blocked_get_jobs)
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=lambda *_args: None,
+    )
+    executor.start(scheduler, "default")
+    original_fill_capacity = executor._fill_capacity
+
+    def tracked_fill_capacity() -> None:
+        try:
+            original_fill_capacity()
+        finally:
+            control_exited.set()
+
+    monkeypatch.setattr(executor, "_fill_capacity", tracked_fill_capacity)
+    executor._request_drain()
+    assert lookup_started.wait(5)
+
+    def shutdown_executor() -> None:
+        try:
+            executor.shutdown(wait=True)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            shutdown_errors.append(exc)
+        finally:
+            shutdown_returned.set()
+
+    shutdown_thread = threading.Thread(target=shutdown_executor)
+    shutdown_thread.start()
+    try:
+        assert shutdown_returned.wait(2)
+        assert not lookup_returned.is_set()
+    finally:
+        release_lookup.set()
+        shutdown_thread.join(timeout=5)
+
+    assert not shutdown_thread.is_alive()
+    assert not shutdown_errors
+    assert control_exited.wait(5)
