@@ -277,6 +277,135 @@ def test_durable_disabled_tick_does_not_use_direct_fallback(
     assert executor.peak_in_memory_user_callbacks == 0
 
 
+def test_durable_submission_scans_recovery_only_on_control_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission wakes recovery without scanning durable history on its thread."""
+    runners = object()
+    job = _job("task-durable", runners)
+    scheduler = _Scheduler([job])
+    scanned = threading.Event()
+    scan_threads: list[str] = []
+
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_submission_is_durable",
+        lambda _task_id, _run_times: True,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_enabled_task_ids",
+        lambda: {job.id},
+    )
+
+    def recoverable_runs(
+        _eligible_task_ids: set[str],
+        *,
+        limit: int,
+    ) -> list[SimpleNamespace]:
+        _ = limit
+        scan_threads.append(threading.current_thread().name)
+        scanned.set()
+        return []
+
+    monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_backlog_snapshot",
+        lambda _eligible: SimpleNamespace(
+            pending_count=0,
+            oldest_pending_age_seconds=None,
+        ),
+    )
+
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=lambda *_args: None,
+    )
+    executor.start(scheduler, "default")
+    try:
+        executor.submit_job(job, [datetime.now(UTC)])
+        assert scanned.wait(5)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert scan_threads
+    assert all(name.startswith("scheduler-control") for name in scan_threads)
+
+
+def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compatibility callback is not suppressed by unrelated durable work."""
+    runners = object()
+    durable_job = _job("task-durable", runners)
+    fallback_started = threading.Event()
+
+    def fallback_callback(**_kwargs: object) -> None:
+        fallback_started.set()
+
+    fallback_job = _job("task-fallback", runners, callback=fallback_callback)
+    scheduler = _Scheduler([durable_job, fallback_job])
+    durable_run = SimpleNamespace(
+        task_id=durable_job.id,
+        fire_time="2026-09-17T12:00:00Z",
+    )
+
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_submission_is_durable",
+        lambda task_id, _run_times: task_id != fallback_job.id,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_enabled_task_ids",
+        lambda: {durable_job.id, fallback_job.id},
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_recoverable_runs",
+        lambda eligible_task_ids, *, limit: [durable_run]
+        if durable_job.id in eligible_task_ids
+        else [],
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_execute_recoverable_run",
+        lambda _run, _runners: [],
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_record_backlog_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scheduler_executor,
+        "_backlog_snapshot",
+        lambda _eligible: SimpleNamespace(
+            pending_count=1,
+            oldest_pending_age_seconds=0.0,
+        ),
+    )
+
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=2,
+        on_submit=lambda *_args: None,
+    )
+    executor.start(scheduler, "default")
+    try:
+        executor.submit_job(fallback_job, [datetime.now(UTC)])
+        assert fallback_started.wait(5)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert fallback_started.is_set()
+
+
 def test_deep_same_task_prefix_does_not_hide_other_dispatchable_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
