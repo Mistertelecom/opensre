@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Collection
-from concurrent.futures import Future, ThreadPoolExecutor as ControlThreadPoolExecutor
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor as ControlThreadPoolExecutor
 from copy import copy
 from datetime import UTC, datetime
 from functools import partial

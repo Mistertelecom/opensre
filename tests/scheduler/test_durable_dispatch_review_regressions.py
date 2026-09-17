@@ -9,10 +9,8 @@ from types import SimpleNamespace
 import pytest
 from apscheduler.events import JobEvent
 
-from infrastructure.scheduling.scheduler import (
-    apscheduler_executor as scheduler_executor,
-    runner,
-)
+from infrastructure.scheduling.scheduler import apscheduler_executor as scheduler_executor
+from infrastructure.scheduling.scheduler import runner
 
 
 class _Scheduler:
@@ -214,10 +212,7 @@ def test_eligibility_reads_task_store_once_per_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A large ownership scan uses one task-store snapshot, not one read per ID."""
-    tasks = [
-        SimpleNamespace(id=f"task-{index}", enabled=index % 2 == 0)
-        for index in range(1_000)
-    ]
+    tasks = [SimpleNamespace(id=f"task-{index}", enabled=index % 2 == 0) for index in range(1_000)]
     calls = 0
 
     def list_tasks_once() -> list[SimpleNamespace]:

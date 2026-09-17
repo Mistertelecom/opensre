@@ -7,8 +7,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from apscheduler.executors.base import MaxInstancesReachedError
 from apscheduler.events import JobEvent
+from apscheduler.executors.base import MaxInstancesReachedError
 
 from infrastructure.scheduling.scheduler import apscheduler_executor as scheduler_executor
 
