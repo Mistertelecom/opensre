@@ -207,7 +207,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         )
 
     def submit_job(self, job: Any, run_times: list[datetime]) -> None:
-        """Persist first, then route durable draining away from admission."""
+        """Persist first, then keep dispatch and telemetry off admission."""
         if not self._durable_dispatch:
             super().submit_job(job, run_times)
             return
@@ -226,28 +226,25 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             if len(job.args) >= 2:
                 self._runners = job.args[1]
 
-        # Preserve APScheduler's per-job overlap signal, but only after the tick
-        # is durable. The next drain will replay it once the live owner finishes.
+        # Preserve APScheduler's per-job overlap signal after durable admission.
+        # Non-durable compatibility submissions do not need a recovery wake.
         with self._lock:
             if self._instances[job.id] >= job.max_instances:
-                self._request_drain()
+                if self._durable_on_submit:
+                    self._request_drain()
                 raise MaxInstancesReachedError(job)
 
-        # Compatibility hooks can explicitly opt out of the durable admission
-        # contract. Their callback must run independently of unrelated backlog.
+        # Compatibility hooks cannot retain overflow durably. Reject admission
+        # explicitly instead of accepting a tick that can never be replayed.
         if not self._durable_on_submit:
-            if self.in_memory_user_callbacks >= self._max_user_workers:
-                self._emit_state("saturated")
-                return
-            self._submit_direct_fallback(job, run_times)
+            if not self._submit_direct_fallback(job, run_times):
+                raise MaxInstancesReachedError(job)
             return
 
-        # Durable recovery may scan historical rows until M2 indexes are in the
-        # same revision. Keep that work entirely on the independent control lane
-        # so scheduler admission remains bounded to persistence + wake-up.
+        # Recovery queries and backlog telemetry may scan historical rows until
+        # M2 indexes are integrated. The control lane owns both; admission only
+        # persists the tick and schedules this bounded wake-up.
         self._request_drain()
-        if self.in_memory_user_callbacks >= self._max_user_workers:
-            self._emit_state("saturated")
 
     def _do_submit_job(self, job: Any, run_times: list[datetime]) -> None:
         """Legacy path used when durable dispatch is unavailable."""
