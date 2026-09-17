@@ -8,7 +8,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor as ControlThreadPoolExecutor
 from copy import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -58,6 +58,25 @@ def _enabled_task_ids() -> set[str]:
     from infrastructure.scheduling.scheduler import runner
 
     return {task.id for task in runner.list_tasks() if task.enabled}
+
+
+def _durable_fire_time(scheduled_run_time: datetime) -> str:
+    """Return the exact durable key used by the production admission hook."""
+    return scheduled_run_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _durable_run_is_terminal(task_id: str, fire_time: str) -> bool:
+    """Return whether an exact durable run can no longer require recovery."""
+    from infrastructure.scheduling.scheduler.storage import get_latest_run_for_fire_time
+    from infrastructure.scheduling.scheduler.types import TaskStatus
+
+    persisted = get_latest_run_for_fire_time(task_id, fire_time)
+    return persisted is not None and persisted.status in {
+        TaskStatus.SUCCESS,
+        TaskStatus.FAILED,
+        TaskStatus.SKIPPED,
+        TaskStatus.ABANDONED,
+    }
 
 
 def _execute_recoverable_run(run: Any, runners: Any) -> list[Any]:
@@ -175,7 +194,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         self._in_memory_user_callbacks = 0
         self._peak_in_memory_user_callbacks = 0
         self._active_task_ids: set[str] = set()
-        self._one_shot_task_ids: set[str] = set()
+        self._deferred_task_ids: set[str] = set()
+        self._one_shot_run_keys: set[tuple[str, str]] = set()
         self._runners: Any | None = None
         self._last_backlog_state: str | None = None
         self._control_cycles = 0
@@ -214,6 +234,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             return
 
         if job.id == _RECOVERY_JOB_ID:
+            with self._dispatch_lock:
+                self._deferred_task_ids.clear()
             self._request_drain()
             return
 
@@ -222,8 +244,11 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._on_submit(job.id, scheduled_run_time)
 
         with self._dispatch_lock:
-            if _is_one_shot_job(job):
-                self._one_shot_task_ids.add(job.id)
+            if self._durable_on_submit and _is_one_shot_job(job):
+                self._one_shot_run_keys.update(
+                    (job.id, _durable_fire_time(scheduled_run_time))
+                    for scheduled_run_time in run_times
+                )
             if len(job.args) >= 2:
                 self._runners = job.args[1]
 
@@ -331,7 +356,11 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 if self._shutdown_event.is_set():
                     return
                 with self._dispatch_lock:
-                    available_task_ids = eligible_task_ids - self._active_task_ids
+                    available_task_ids = (
+                        eligible_task_ids
+                        - self._active_task_ids
+                        - self._deferred_task_ids
+                    )
                 if not available_task_ids:
                     break
 
@@ -369,8 +398,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         Recurring task ownership comes only from the scheduler's current job set.
         Therefore a resync that removes a job because it no longer matches this
         scheduler's task filter also removes it from durable dispatch eligibility.
-        Date jobs are retained separately because APScheduler removes them after
-        their one allowed fire even when their durable tick is still waiting.
+        Date jobs retain only their exact admitted fire-time keys because
+        APScheduler removes them after their one allowed fire.
         """
         if self._shutdown_event.is_set():
             return set()
@@ -387,7 +416,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             return set()
 
         with self._dispatch_lock:
-            one_shot_ids = set(self._one_shot_task_ids)
+            one_shot_ids = {task_id for task_id, _fire_time in self._one_shot_run_keys}
             candidate_ids = scheduler_ids | one_shot_ids
 
         try:
@@ -396,11 +425,6 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             logger.warning("Could not snapshot scheduled tasks for dispatch", exc_info=True)
             return set()
 
-        stale_one_shots = one_shot_ids - enabled_task_ids
-        if stale_one_shots:
-            with self._dispatch_lock:
-                self._one_shot_task_ids.difference_update(stale_one_shots)
-
         return candidate_ids & enabled_task_ids
 
     def _submit_recoverable(self, run: Any) -> bool:
@@ -408,15 +432,17 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         if self._shutdown_event.is_set():
             return False
 
+        run_key = (str(run.task_id), str(run.fire_time))
         with self._dispatch_lock:
             if (
                 self._shutdown_event.is_set()
                 or self._in_memory_user_callbacks >= self._max_user_workers
                 or run.task_id in self._active_task_ids
+                or run.task_id in self._deferred_task_ids
             ):
                 return False
 
-            is_one_shot = run.task_id in self._one_shot_task_ids
+            is_one_shot = run_key in self._one_shot_run_keys
             registered_job: Any | None = None
             if not is_one_shot:
                 try:
@@ -452,7 +478,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         except Exception:
             self._rollback_reservation(run.task_id)
             raise
-        future.add_done_callback(partial(self._user_future_done, run.task_id))
+        future.add_done_callback(partial(self._durable_future_done, run))
         return True
 
     def _submit_direct_fallback(self, job: Any, run_times: list[datetime]) -> bool:
@@ -498,6 +524,28 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._active_task_ids.discard(task_id)
             self._in_memory_user_callbacks = max(0, self._in_memory_user_callbacks - 1)
 
+    def _durable_future_done(self, run: Any, future: Future[list[Any]]) -> None:
+        """Release a durable slot without hot-looping a failed pending row."""
+        exc, traceback = (
+            future.exception_info()
+            if hasattr(future, "exception_info")
+            else (future.exception(), getattr(future.exception(), "__traceback__", None))
+        )
+        if exc:
+            with self._dispatch_lock:
+                self._deferred_task_ids.add(run.task_id)
+            self._run_job_error(run.task_id, exc, traceback)
+        else:
+            self._run_job_success(run.task_id, future.result())
+
+        with self._dispatch_lock:
+            self._active_task_ids.discard(run.task_id)
+            self._in_memory_user_callbacks = max(0, self._in_memory_user_callbacks - 1)
+
+        self._retire_one_shot_key_if_terminal(run)
+        if exc is None:
+            self._request_drain()
+
     def _user_future_done(self, task_id: str, future: Future[list[Any]]) -> None:
         exc, traceback = (
             future.exception_info()
@@ -513,6 +561,25 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._active_task_ids.discard(task_id)
             self._in_memory_user_callbacks = max(0, self._in_memory_user_callbacks - 1)
         self._request_drain()
+
+    def _retire_one_shot_key_if_terminal(self, run: Any) -> None:
+        run_key = (str(run.task_id), str(run.fire_time))
+        with self._dispatch_lock:
+            if run_key not in self._one_shot_run_keys:
+                return
+        try:
+            is_terminal = _durable_run_is_terminal(*run_key)
+        except Exception:  # noqa: BLE001 - exact-key ownership remains safely scoped
+            logger.debug(
+                "Could not verify terminal one-shot run %s fire_time=%s",
+                run.task_id,
+                run.fire_time,
+                exc_info=True,
+            )
+            return
+        if is_terminal:
+            with self._dispatch_lock:
+                self._one_shot_run_keys.discard(run_key)
 
     def _runners_from_registered_job(self, task_id: str) -> Any | None:
         try:
