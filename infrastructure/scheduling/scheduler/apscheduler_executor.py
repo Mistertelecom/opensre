@@ -53,6 +53,24 @@ def _recoverable_runs(
     return get_recoverable_runs(limit=limit, eligible_task_ids=eligible_task_ids)
 
 
+def _recoverable_scope_runs(
+    eligible_task_ids: Collection[str],
+    exact_run_keys: Collection[tuple[str, str]],
+    *,
+    limit: int,
+) -> list[Any]:
+    """Load recurring IDs plus exact one-shot keys with filtering before LIMIT."""
+    from infrastructure.scheduling.scheduler.storage.recoverable_keys import (
+        get_recoverable_runs_for_scope,
+    )
+
+    return get_recoverable_runs_for_scope(
+        eligible_task_ids,
+        exact_run_keys,
+        limit=limit,
+    )
+
+
 def _enabled_task_ids() -> set[str]:
     """Load the task store once and return every currently enabled task id."""
     from infrastructure.scheduling.scheduler import runner
@@ -335,9 +353,9 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         """Fill free user slots from durable work in admission order.
 
         The durable query is repeated after each successful reservation with the
-        now-active task ids excluded from eligibility. This avoids a fixed-size
-        prefix of same-task rows hiding unrelated dispatchable work later in the
-        backlog while same-task exclusion is active.
+        now-active task ids excluded from eligibility. Exact one-shot ownership
+        keys are filtered in SQL before the batch limit, so stale rows for a moved
+        task cannot hide the admitted DateTrigger tick or unrelated recurring work.
         """
         with self._pump_lock:
             if self._shutdown_event.is_set():
@@ -346,7 +364,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._emit_state("saturated")
                 return
 
-            eligible_task_ids = self._eligible_task_ids()
+            recurring_task_ids, one_shot_run_keys = self._eligible_dispatch_scope()
             if self._shutdown_event.is_set():
                 return
             dispatched = 0
@@ -356,13 +374,24 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 if self._shutdown_event.is_set():
                     return
                 with self._dispatch_lock:
-                    available_task_ids = (
-                        eligible_task_ids - self._active_task_ids - self._deferred_task_ids
-                    )
-                if not available_task_ids:
+                    unavailable_task_ids = self._active_task_ids | self._deferred_task_ids
+                    available_task_ids = recurring_task_ids - unavailable_task_ids
+                    available_one_shot_keys = {
+                        run_key
+                        for run_key in one_shot_run_keys
+                        if run_key[0] not in unavailable_task_ids
+                    }
+                if not available_task_ids and not available_one_shot_keys:
                     break
 
-                candidates = _recoverable_runs(available_task_ids, limit=limit)
+                if available_one_shot_keys:
+                    candidates = _recoverable_scope_runs(
+                        available_task_ids,
+                        available_one_shot_keys,
+                        limit=limit,
+                    )
+                else:
+                    candidates = _recoverable_runs(available_task_ids, limit=limit)
                 if not candidates:
                     break
 
@@ -390,17 +419,10 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             else:
                 self._emit_state("idle")
 
-    def _eligible_task_ids(self) -> set[str]:
-        """Return enabled tasks currently owned by this scheduler instance.
-
-        Recurring task ownership comes only from the scheduler's current job set.
-        Therefore a resync that removes a job because it no longer matches this
-        scheduler's task filter also removes it from durable dispatch eligibility.
-        Date jobs retain only their exact admitted fire-time keys because
-        APScheduler removes them after their one allowed fire.
-        """
+    def _eligible_dispatch_scope(self) -> tuple[set[str], set[tuple[str, str]]]:
+        """Return enabled recurring IDs and exact one-shot keys owned here."""
         if self._shutdown_event.is_set():
-            return set()
+            return set(), set()
 
         scheduler_ids: set[str] = set()
         try:
@@ -411,19 +433,27 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             logger.debug("Could not snapshot registered scheduler jobs", exc_info=True)
 
         if self._shutdown_event.is_set():
-            return set()
+            return set(), set()
 
         with self._dispatch_lock:
-            one_shot_ids = {task_id for task_id, _fire_time in self._one_shot_run_keys}
-            candidate_ids = scheduler_ids | one_shot_ids
+            one_shot_run_keys = set(self._one_shot_run_keys)
 
         try:
             enabled_task_ids = _enabled_task_ids()
         except Exception:  # noqa: BLE001 - task-store failure is retried on the next wake
             logger.warning("Could not snapshot scheduled tasks for dispatch", exc_info=True)
-            return set()
+            return set(), set()
 
-        return candidate_ids & enabled_task_ids
+        recurring_task_ids = scheduler_ids & enabled_task_ids
+        exact_one_shot_keys = {
+            run_key for run_key in one_shot_run_keys if run_key[0] in enabled_task_ids
+        }
+        return recurring_task_ids, exact_one_shot_keys
+
+    def _eligible_task_ids(self) -> set[str]:
+        """Return enabled task IDs represented by this scheduler's durable scope."""
+        recurring_task_ids, one_shot_run_keys = self._eligible_dispatch_scope()
+        return recurring_task_ids | {task_id for task_id, _fire_time in one_shot_run_keys}
 
     def _submit_recoverable(self, run: Any) -> bool:
         """Reserve one user slot and execute an exact persisted fire-time key."""
@@ -523,7 +553,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._in_memory_user_callbacks = max(0, self._in_memory_user_callbacks - 1)
 
     def _durable_future_done(self, run: Any, future: Future[list[Any]]) -> None:
-        """Release a durable slot without hot-looping a failed pending row."""
+        """Release a durable slot while deferring only the failed task itself."""
         exc, traceback = (
             future.exception_info()
             if hasattr(future, "exception_info")
@@ -541,8 +571,10 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._in_memory_user_callbacks = max(0, self._in_memory_user_callbacks - 1)
 
         self._retire_one_shot_key_if_terminal(run)
-        if exc is None:
-            self._request_drain()
+        # Always refill the released slot. A failed task is excluded by the
+        # deferred set until periodic recovery, so unrelated pending work can
+        # make immediate progress without hot-looping the failing row.
+        self._request_drain()
 
     def _user_future_done(self, task_id: str, future: Future[list[Any]]) -> None:
         exc, traceback = (
