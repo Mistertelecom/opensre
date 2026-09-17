@@ -24,6 +24,9 @@ if TYPE_CHECKING:
         OPENSRE_ACCOUNT_LLM_BASE_PATH as OPENSRE_ACCOUNT_LLM_BASE_PATH,
     )
     from config.constants.account import (
+        OPENSRE_ACCOUNT_LLM_MODEL_ENV as OPENSRE_ACCOUNT_LLM_MODEL_ENV,
+    )
+    from config.constants.account import (
         OPENSRE_ACCOUNT_METADATA_PATH_ENV as OPENSRE_ACCOUNT_METADATA_PATH_ENV,
     )
     from config.constants.account import (
@@ -43,6 +46,9 @@ if TYPE_CHECKING:
     )
     from config.constants.account import (
         OPENSRE_APP_URL_ENV as OPENSRE_APP_URL_ENV,
+    )
+    from config.constants.account import (
+        OPENSRE_GATEWAY_LLM_MODEL_DEFAULT as OPENSRE_GATEWAY_LLM_MODEL_DEFAULT,
     )
     from config.constants.account import (
         OPENSRE_STAFF_EMAIL_DOMAIN as OPENSRE_STAFF_EMAIL_DOMAIN,

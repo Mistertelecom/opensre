@@ -27,6 +27,7 @@ EXPORTS: dict[str, str] = {
     "OPENSRE_ACCOUNT_FILENAME": "account",
     "OPENSRE_ACCOUNT_HTTP_TIMEOUT_SECONDS": "account",
     "OPENSRE_ACCOUNT_LLM_BASE_PATH": "account",
+    "OPENSRE_ACCOUNT_LLM_MODEL_ENV": "account",
     "OPENSRE_ACCOUNT_METADATA_PATH_ENV": "account",
     "OPENSRE_ACCOUNT_SESSION_PATH": "account",
     "OPENSRE_ACCOUNT_TOKEN_ENV": "account",
@@ -34,6 +35,7 @@ EXPORTS: dict[str, str] = {
     "OPENSRE_APP_URL_DEFAULT": "account",
     "OPENSRE_APP_URL_DEV": "account",
     "OPENSRE_APP_URL_ENV": "account",
+    "OPENSRE_GATEWAY_LLM_MODEL_DEFAULT": "account",
     "OPENSRE_STAFF_EMAIL_DOMAIN": "account",
     # analytics
     "ANALYTICS_DISABLED_ENV": "analytics",
