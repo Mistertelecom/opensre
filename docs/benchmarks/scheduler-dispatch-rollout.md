@@ -40,6 +40,10 @@ The following invariants are part of the scheduler contract:
   workers that are blocked on the shared turn gate.
 - Existing APScheduler same-job overlap/coalescing remains a scheduler policy;
   any tick passed to the executor is persisted before a max-instance rejection.
+- Recurring durable dispatch follows the scheduler's current registered-job set,
+  so a filtered resync cannot keep claiming work for a task that moved to another
+  scheduler owner. APScheduler date jobs retain only their admitted one-shot tick
+  after the job itself is removed.
 - Disabled tasks remain durable and can resume when re-enabled. Deleted schedules
   are not reported as operator backlog by `opensre cron status`.
 
@@ -76,11 +80,19 @@ The focused dispatcher tests must prove all of the following before merge:
 5. Same-task exclusion and claim fencing remain enforced by the run store.
 6. Restart recovery uses the same bounded dispatch path; it does not enqueue the
    entire durable backlog into the thread-pool queue.
+7. Filtered resync cannot drain a recurring task after that scheduler no longer
+   owns its registered job.
+8. A deep same-task prefix cannot hide unrelated dispatchable work beyond the
+   first recovery-query batch.
 
 Run the focused suite with:
 
 ```bash
-uv run pytest tests/scheduler/test_apscheduler_executor.py tests/scheduler/test_runner.py -q
+uv run pytest \
+  tests/scheduler/test_apscheduler_executor.py \
+  tests/scheduler/test_durable_dispatch.py \
+  tests/scheduler/test_durable_dispatch_review_regressions.py \
+  tests/scheduler/test_runner.py -q
 ```
 
 After #6173 is integrated into the same revision, also run its deterministic
