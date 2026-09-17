@@ -107,8 +107,7 @@ def test_one_shot_hint_is_exact_and_retires_after_terminal_run(
         return [
             run
             for run in pending
-            if run.task_id in eligible_task_ids
-            or (run.task_id, run.fire_time) in exact_run_keys
+            if run.task_id in eligible_task_ids or (run.task_id, run.fire_time) in exact_run_keys
         ][:limit]
 
     def execute_recoverable(run: SimpleNamespace, _runners: object) -> list[object]:
