@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from apscheduler.events import JobEvent
+from apscheduler.executors.base import MaxInstancesReachedError
 
 from infrastructure.scheduling.scheduler import apscheduler_executor as scheduler_executor
 from infrastructure.scheduling.scheduler import runner
@@ -272,15 +273,17 @@ def test_durable_disabled_tick_does_not_use_direct_fallback(
     assert executor.peak_in_memory_user_callbacks == 0
 
 
-def test_durable_submission_scans_recovery_only_on_control_lane(
+def test_durable_submission_scans_and_reports_only_on_control_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admission wakes recovery without scanning durable history on its thread."""
+    """Admission only wakes recovery; scans and telemetry stay on control."""
     runners = object()
     job = _job("task-durable", runners)
     scheduler = _Scheduler([job])
     scanned = threading.Event()
+    reported = threading.Event()
     scan_threads: list[str] = []
+    telemetry_threads: list[str] = []
 
     monkeypatch.setattr(
         scheduler_executor,
@@ -298,12 +301,12 @@ def test_durable_submission_scans_recovery_only_on_control_lane(
         scanned.set()
         return []
 
+    def record_state(*_args: object, **_kwargs: object) -> None:
+        telemetry_threads.append(threading.current_thread().name)
+        reported.set()
+
     monkeypatch.setattr(scheduler_executor, "_recoverable_runs", recoverable_runs)
-    monkeypatch.setattr(
-        scheduler_executor,
-        "_record_backlog_state",
-        lambda *_args, **_kwargs: None,
-    )
+    monkeypatch.setattr(scheduler_executor, "_record_backlog_state", record_state)
     monkeypatch.setattr(
         scheduler_executor,
         "_backlog_snapshot",
@@ -321,11 +324,14 @@ def test_durable_submission_scans_recovery_only_on_control_lane(
     try:
         executor.submit_job(job, [datetime.now(UTC)])
         assert scanned.wait(5)
+        assert reported.wait(5)
     finally:
         executor.shutdown(wait=True)
 
     assert scan_threads
+    assert telemetry_threads
     assert all(name.startswith("scheduler-control") for name in scan_threads)
+    assert all(name.startswith("scheduler-control") for name in telemetry_threads)
 
 
 def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
@@ -336,7 +342,7 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
     durable_job = _job("task-durable", runners)
     fallback_started = threading.Event()
 
-    def fallback_callback(**_kwargs: object) -> None:
+    def fallback_callback(*_args: object, **_kwargs: object) -> None:
         fallback_started.set()
 
     fallback_job = _job("task-fallback", runners, callback=fallback_callback)
@@ -354,9 +360,9 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
     monkeypatch.setattr(
         scheduler_executor,
         "_recoverable_runs",
-        lambda eligible_task_ids, *, limit: [durable_run]
-        if durable_job.id in eligible_task_ids
-        else [],
+        lambda eligible_task_ids, *, _limit: (
+            [durable_run] if durable_job.id in eligible_task_ids else []
+        ),
     )
     monkeypatch.setattr(
         scheduler_executor,
@@ -390,6 +396,40 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
         executor.shutdown(wait=True)
 
     assert fallback_started.is_set()
+
+
+def test_non_durable_overflow_is_rejected_instead_of_dropped() -> None:
+    """Compatibility submissions fail admission when no bounded slot exists."""
+    runners = object()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+
+    def first_callback(*_args: object, **_kwargs: object) -> None:
+        first_started.set()
+        assert release_first.wait(10)
+
+    def second_callback(*_args: object, **_kwargs: object) -> None:
+        second_started.set()
+
+    first = _job("task-first", runners, callback=first_callback)
+    second = _job("task-second", runners, callback=second_callback)
+    scheduler = _Scheduler([first, second])
+    executor = scheduler_executor.ScheduledThreadPoolExecutor(
+        max_workers=1,
+        on_submit=lambda *_args: None,
+        durable_on_submit=False,
+    )
+    executor.start(scheduler, "default")
+    try:
+        executor.submit_job(first, [datetime.now(UTC)])
+        assert first_started.wait(5)
+        with pytest.raises(MaxInstancesReachedError):
+            executor.submit_job(second, [datetime.now(UTC) + timedelta(seconds=1)])
+        assert not second_started.is_set()
+    finally:
+        release_first.set()
+        executor.shutdown(wait=True)
 
 
 def test_deep_same_task_prefix_does_not_hide_other_dispatchable_task(
