@@ -8,7 +8,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor as ControlThreadPoolExecutor
 from copy import copy
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -58,22 +58,6 @@ def _enabled_task_ids() -> set[str]:
     from infrastructure.scheduling.scheduler import runner
 
     return {task.id for task in runner.list_tasks() if task.enabled}
-
-
-def _submission_is_durable(job_id: str, run_times: Collection[datetime]) -> bool:
-    """Return whether every submitted fire time already has a durable run row.
-
-    This check is only used before the compatibility fallback. Production
-    admissions write the run row first; custom/test hooks that do not persist
-    anything can still use the direct APScheduler callback path.
-    """
-    from infrastructure.scheduling.scheduler.storage import get_latest_run_for_fire_time
-
-    for scheduled_run_time in run_times:
-        fire_time = scheduled_run_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if get_latest_run_for_fire_time(job_id, fire_time) is None:
-            return False
-    return True
 
 
 def _execute_recoverable_run(run: Any, runners: Any) -> list[Any]:
@@ -171,8 +155,10 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         max_workers: int = 10,
         *,
         on_submit: Callable[[str, datetime], None] | None = None,
+        durable_on_submit: bool = True,
     ) -> None:
         self._on_submit = on_submit
+        self._durable_on_submit = durable_on_submit
         self._max_user_workers = max_workers
         self._dispatch_lock = threading.RLock()
         self._pump_lock = threading.Lock()
@@ -247,9 +233,9 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._request_drain()
                 raise MaxInstancesReachedError(job)
 
-        # Compatibility hooks that do not persist the submitted fire time must
-        # still execute their own callback regardless of unrelated durable work.
-        if not _submission_is_durable(job.id, run_times):
+        # Compatibility hooks can explicitly opt out of the durable admission
+        # contract. Their callback must run independently of unrelated backlog.
+        if not self._durable_on_submit:
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
                 return
