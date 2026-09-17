@@ -130,9 +130,6 @@ def test_resync_removed_recurring_job_is_not_drained_by_old_filtered_scheduler(
         executor.submit_job(first, [now])
         assert first_started.wait(10)
         executor.submit_job(moved, [now + timedelta(seconds=1)])
-
-        # Simulate resync removing a task that no longer matches this scheduler's
-        # task_filter. Its durable row must not be claimed by this old owner.
         scheduler.jobs.pop(moved.id)
         release_first.set()
 
@@ -360,7 +357,7 @@ def test_non_durable_fallback_runs_even_with_unrelated_durable_backlog(
     monkeypatch.setattr(
         scheduler_executor,
         "_recoverable_runs",
-        lambda eligible_task_ids, *, _limit: (
+        lambda eligible_task_ids, **_kwargs: (
             [durable_run] if durable_job.id in eligible_task_ids else []
         ),
     )
