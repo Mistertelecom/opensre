@@ -338,7 +338,7 @@ def test_shutdown_does_not_join_control_lookup_blocked_on_scheduler(
     lookup_returned = threading.Event()
     control_exited = threading.Event()
     shutdown_returned = threading.Event()
-    shutdown_errors: list[BaseException] = []
+    shutdown_errors: list[Exception] = []
 
     def blocked_get_jobs() -> list[SimpleNamespace]:
         lookup_started.set()
@@ -367,7 +367,7 @@ def test_shutdown_does_not_join_control_lookup_blocked_on_scheduler(
     def shutdown_executor() -> None:
         try:
             executor.shutdown(wait=True)
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except Exception as exc:  # pragma: no cover - surfaced below
             shutdown_errors.append(exc)
         finally:
             shutdown_returned.set()
