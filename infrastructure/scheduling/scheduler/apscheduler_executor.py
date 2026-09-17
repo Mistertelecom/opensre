@@ -170,6 +170,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         self._control_running = False
         self._control_requested = False
         self._stopped = False
+        self._shutdown_event = threading.Event()
         self._durable_dispatch = False
         self._in_memory_user_callbacks = 0
         self._peak_in_memory_user_callbacks = 0
@@ -274,8 +275,10 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
     def _request_drain(self) -> None:
         """Coalesce wake-ups onto the independent scheduler control lane."""
+        if self._shutdown_event.is_set():
+            return
         with self._control_lock:
-            if self._stopped:
+            if self._stopped or self._shutdown_event.is_set():
                 return
             self._control_requested = True
             if self._control_running:
@@ -290,7 +293,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         """Drain all coalesced wake-ups without occupying a user worker."""
         while True:
             with self._control_lock:
-                if self._stopped:
+                if self._stopped or self._shutdown_event.is_set():
                     self._control_running = False
                     return
                 if not self._control_requested:
@@ -312,15 +315,21 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         backlog while same-task exclusion is active.
         """
         with self._pump_lock:
+            if self._shutdown_event.is_set():
+                return
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
                 return
 
             eligible_task_ids = self._eligible_task_ids()
+            if self._shutdown_event.is_set():
+                return
             dispatched = 0
             limit = max(_RECOVERABLE_BATCH_MIN, self._max_user_workers * 32)
 
             while self.in_memory_user_callbacks < self._max_user_workers:
+                if self._shutdown_event.is_set():
+                    return
                 with self._dispatch_lock:
                     available_task_ids = eligible_task_ids - self._active_task_ids
                 if not available_task_ids:
@@ -332,6 +341,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
                 submitted_this_pass = False
                 for run in candidates:
+                    if self._shutdown_event.is_set():
+                        return
                     if self.in_memory_user_callbacks >= self._max_user_workers:
                         break
                     if self._submit_recoverable(run):
@@ -343,6 +354,8 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 if not submitted_this_pass:
                     break
 
+            if self._shutdown_event.is_set():
+                return
             if self.in_memory_user_callbacks >= self._max_user_workers:
                 self._emit_state("saturated")
             elif dispatched:
@@ -359,6 +372,9 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
         Date jobs are retained separately because APScheduler removes them after
         their one allowed fire even when their durable tick is still waiting.
         """
+        if self._shutdown_event.is_set():
+            return set()
+
         scheduler_ids: set[str] = set()
         try:
             for job in self._scheduler.get_jobs():
@@ -366,6 +382,9 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                     scheduler_ids.add(str(job.id))
         except Exception:  # noqa: BLE001 - a concurrent resync may mutate job state
             logger.debug("Could not snapshot registered scheduler jobs", exc_info=True)
+
+        if self._shutdown_event.is_set():
+            return set()
 
         with self._dispatch_lock:
             one_shot_ids = set(self._one_shot_task_ids)
@@ -386,9 +405,13 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
     def _submit_recoverable(self, run: Any) -> bool:
         """Reserve one user slot and execute an exact persisted fire-time key."""
+        if self._shutdown_event.is_set():
+            return False
+
         with self._dispatch_lock:
             if (
-                self._in_memory_user_callbacks >= self._max_user_workers
+                self._shutdown_event.is_set()
+                or self._in_memory_user_callbacks >= self._max_user_workers
                 or run.task_id in self._active_task_ids
             ):
                 return False
@@ -405,7 +428,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                         exc_info=True,
                     )
                     return False
-                if registered_job is None:
+                if registered_job is None or self._shutdown_event.is_set():
                     return False
 
             runners = self._runners
@@ -414,7 +437,7 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
                 self._runners = runners
             if runners is None:
                 runners = self._runners_from_registered_job(run.task_id)
-            if runners is None:
+            if runners is None or self._shutdown_event.is_set():
                 return False
 
             max_instances = int(registered_job.max_instances) if registered_job is not None else 1
@@ -512,12 +535,16 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
 
     def _emit_state(self, state: str) -> None:
         """Record only backlog state transitions, not every count mutation."""
+        if self._shutdown_event.is_set():
+            return
         with self._dispatch_lock:
             if state == self._last_backlog_state:
                 return
             active_runs = self._in_memory_user_callbacks
 
         eligible_task_ids = self._eligible_task_ids()
+        if self._shutdown_event.is_set():
+            return
         if not eligible_task_ids and state != "idle":
             return
         try:
@@ -537,10 +564,17 @@ class ScheduledThreadPoolExecutor(ThreadPoolExecutor):
             self._last_backlog_state = state
 
     def shutdown(self, wait: bool = True) -> None:
+        self._shutdown_event.set()
         with self._control_lock:
             self._stopped = True
             self._control_requested = False
-        self._control_pool.shutdown(wait=wait)
+
+        # A running control cycle can be blocked in scheduler.get_jobs/get_job
+        # behind APScheduler's job-store lock while shutdown is in progress.
+        # Joining that internal lane here can therefore deadlock scheduler
+        # shutdown. Cancel queued wakes and let at most one in-flight cycle
+        # observe the shutdown event and unwind once the scheduler lock clears.
+        self._control_pool.shutdown(wait=False, cancel_futures=True)
         super().shutdown(wait=wait)
 
 
