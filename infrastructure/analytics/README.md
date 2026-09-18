@@ -98,6 +98,7 @@ server-owned column resolved from the bearer token.
 | Area | Events | Important properties / question answered |
 | --- | --- | --- |
 | Acquisition | `install_detected`, `account_authenticated`, `cli_invoked` | Install source/channel/distribution, login conversion, entrypoint, command names, and boolean flags; never raw argument values. Official installers invoke the hidden record-only path immediately after installation. |
+| Sign-in gate | `sign_in_selected`, `stay_signed_out_selected` | One event per explicit menu selection at the interactive-shell sign-in gate (`choice_label`, `surface=cli`, `entrypoint=sign_in_gate`). `sign_in_selected` records intent before login runs, once per attempt, and does not imply success; `account_authenticated` still marks success. Dismissal, interruption, non-interactive runs, and already-signed-in sessions emit nothing. |
 | Runtime health | `user_id_load_failed`, `sentry_init_skipped` | Identity persistence and telemetry setup failures. |
 | Onboarding | `onboard_started`, `onboard_completed`, `onboard_failed` | Funnel conversion, wizard mode, target, provider, and model. |
 | Integrations | `integration_setup_started`, `integration_setup_completed`, `integration_verified`, `integration_removed`, `integrations_listed` | Integration adoption and setup/verification conversion by service. |
