@@ -75,6 +75,7 @@ def run_sign_in_gate(
     *,
     is_signed_in: Callable[[], bool],
     login: Callable[[], bool],
+    on_choice: Callable[[SignInChoice], None] | None = None,
 ) -> bool:
     """Gate the REPL behind sign-in; return ``True`` to proceed, ``False`` to exit.
 
@@ -93,6 +94,8 @@ def run_sign_in_gate(
     render_sign_in_screen(console)
     while True:
         choice = prompt_login_or_exit()
+        if choice is not None and on_choice is not None:
+            on_choice(choice)
         if choice is SignInChoice.LOGIN:
             if login():
                 return True

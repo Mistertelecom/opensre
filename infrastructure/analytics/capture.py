@@ -96,6 +96,30 @@ def capture_account_authenticated() -> None:
         capture_exception(exc)
 
 
+def capture_sign_in_selected() -> None:
+    """Record explicit sign-in intent before authentication begins."""
+    _capture(
+        Event.SIGN_IN_SELECTED,
+        {
+            "choice_label": "Sign in or create account",
+            "surface": "cli",
+            "entrypoint": "sign_in_gate",
+        },
+    )
+
+
+def capture_stay_signed_out_selected() -> None:
+    """Record an explicit exit selection, excluding dismissal or interruption."""
+    _capture(
+        Event.STAY_SIGNED_OUT_SELECTED,
+        {
+            "choice_label": "Exit and stay signed out",
+            "surface": "cli",
+            "entrypoint": "sign_in_gate",
+        },
+    )
+
+
 def capture_gateway_turn_started(*, surface: str) -> None:
     """Mark the start of one Slack/Telegram gateway agent turn."""
     _capture(Event.GATEWAY_TURN_STARTED, {"surface": surface})

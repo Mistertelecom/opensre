@@ -8,11 +8,14 @@ import subprocess
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from rich.console import Console
 
 import surfaces.interactive_shell.main as main_entrypoint
 import surfaces.interactive_shell.runtime.startup.account_gate as account_gate
 from config.repl_config import ReplConfig
+from infrastructure.analytics import capture
+from infrastructure.analytics.events import Event
 from surfaces.interactive_shell.session import Session
 from surfaces.interactive_shell.ui.sign_in import SignInChoice
 
@@ -94,6 +97,77 @@ def test_pass_sign_in_gate_allows_only_valid_account(monkeypatch: Any) -> None:
     )
 
     assert account_gate.pass_sign_in_gate(_console()) is False
+
+
+def test_gate_records_each_explicit_choice_before_login_and_exit(monkeypatch: Any) -> None:
+    events: list[tuple[Event, dict[str, object] | None]] = []
+
+    class _Analytics:
+        def capture(self, event: Event, properties: dict[str, object] | None = None) -> None:
+            events.append((event, properties))
+
+    analytics = _Analytics()
+    choices = iter([SignInChoice.LOGIN, SignInChoice.LOGIN, SignInChoice.EXIT])
+    login_calls = 0
+
+    def _login(**_kwargs: Any) -> bool:
+        nonlocal login_calls
+        login_calls += 1
+        assert len(events) == login_calls
+        assert events[-1][0] == Event.SIGN_IN_SELECTED
+        return False
+
+    monkeypatch.setattr(capture, "get_analytics", lambda: analytics)
+    monkeypatch.setattr(account_gate, "is_test_run", lambda: False)
+    monkeypatch.setattr(account_gate, "account_is_signed_in", lambda: False)
+    monkeypatch.setattr(account_gate, "account_login", _login)
+    monkeypatch.setattr("surfaces.interactive_shell.ui.sign_in.repl_tty_interactive", lambda: True)
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.ui.sign_in.render_sign_in_screen", lambda _c: None
+    )
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.ui.sign_in.prompt_login_or_exit", lambda: next(choices)
+    )
+
+    assert account_gate.pass_sign_in_gate(_console()) is False
+    assert [event for event, _ in events] == [
+        Event.SIGN_IN_SELECTED,
+        Event.SIGN_IN_SELECTED,
+        Event.STAY_SIGNED_OUT_SELECTED,
+    ]
+    assert [props["choice_label"] for _, props in events if props] == [
+        SignInChoice.LOGIN.value,
+        SignInChoice.LOGIN.value,
+        SignInChoice.EXIT.value,
+    ]
+
+
+@pytest.mark.parametrize("signed_in, interactive", [(True, True), (False, False), (False, True)])
+def test_gate_does_not_invent_a_choice_without_an_explicit_selection(
+    monkeypatch: Any,
+    signed_in: bool,
+    interactive: bool,
+) -> None:
+    events: list[Event] = []
+
+    class _Analytics:
+        def capture(self, event: Event, _properties: object = None) -> None:
+            events.append(event)
+
+    analytics = _Analytics()
+    monkeypatch.setattr(capture, "get_analytics", lambda: analytics)
+    monkeypatch.setattr(account_gate, "is_test_run", lambda: False)
+    monkeypatch.setattr(account_gate, "account_is_signed_in", lambda: signed_in)
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.ui.sign_in.repl_tty_interactive", lambda: interactive
+    )
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.ui.sign_in.render_sign_in_screen", lambda _c: None
+    )
+    monkeypatch.setattr("surfaces.interactive_shell.ui.sign_in.prompt_login_or_exit", lambda: None)
+
+    assert account_gate.pass_sign_in_gate(_console()) is signed_in
+    assert events == []
 
 
 def test_run_repl_stops_before_runtime_when_sign_in_is_declined(monkeypatch: Any) -> None:
