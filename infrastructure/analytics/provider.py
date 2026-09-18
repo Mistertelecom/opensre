@@ -387,7 +387,7 @@ def _event_insert_id(event: str, distinct_id: str, *, install_recovery: bool = F
 def _install_delivery_path(anonymous_id: str, destination: AnalyticsDestination) -> Path:
     scope = f"{anonymous_id}\n{destination.endpoint_url}"
     receipt_key = hashlib.sha256(scope.encode("utf-8")).hexdigest()
-    return _FIRST_RUN_PATH.parent / "install-deliveries-v1" / receipt_key
+    return _CONFIG_DIR / "install-deliveries-v1" / receipt_key
 
 
 def _create_marker(path: Path) -> bool:
