@@ -390,21 +390,36 @@ def _install_delivery_path(anonymous_id: str, destination: AnalyticsDestination)
     return _FIRST_RUN_PATH.parent / "install-deliveries-v1" / receipt_key
 
 
-def _touch_once(path: Path) -> bool:
-    global _first_run_marker_created_this_process
+def _create_marker(path: Path) -> bool:
+    """Create ``path`` exclusively; ``False`` when it already exists, ``OSError`` otherwise."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as fh:
             fh.flush()
             os.fsync(fh.fileno())
-        _fsync_parent_dir(path)
-        if path == _FIRST_RUN_PATH:
-            _first_run_marker_created_this_process = True
-        return True
     except FileExistsError:
         return False
+    _fsync_parent_dir(path)
+    return True
+
+
+def _touch_once(path: Path) -> bool:
+    global _first_run_marker_created_this_process
+    try:
+        created = _create_marker(path)
     except OSError:
         return False
+    if created and path == _FIRST_RUN_PATH:
+        _first_run_marker_created_this_process = True
+    return created
+
+
+def _record_install_delivery(path: Path) -> None:
+    """Persist the server's acknowledgement; a lost receipt resends an accepted install."""
+    try:
+        _create_marker(path)
+    except OSError as exc:
+        _log_failure("install_receipt", exc, path=str(path))
 
 
 def _cli_version() -> str:
@@ -1096,7 +1111,7 @@ class Analytics:
             _capture_sentry_failure(exc)
         else:
             if item.event == Event.INSTALL_DETECTED.value:
-                _touch_once(_install_delivery_path(self._anonymous_id, destination))
+                _record_install_delivery(_install_delivery_path(self._anonymous_id, destination))
                 _touch_once(_FIRST_RUN_PATH)
 
     def _mark_done(self) -> None:

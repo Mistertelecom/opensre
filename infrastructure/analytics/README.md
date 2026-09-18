@@ -58,7 +58,8 @@ the event body or source distribution. Production origins require HTTPS.
   `install_detected:{anonymous_id}:delivery-v1` and sets
   `install_detection_reason=unverified_marker`. This is a current detection,
   not a reconstruction of the original installation. The separate key preserves
-  any earlier event already stored by the server.
+  any earlier event already stored by the server; `METRICS.md` (Installations)
+  defines how consumers collapse the two into one installation.
 - `occurred_at` is assigned when the event enters the local queue, not when the
   network request finishes.
 - `anonymous_id` is the random installation ID stored in

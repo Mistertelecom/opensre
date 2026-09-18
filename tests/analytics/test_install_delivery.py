@@ -103,6 +103,30 @@ def test_legacy_recovery_retries_until_explicit_acknowledgement(
     assert deliveries[0]["event_id"] == deliveries[1]["event_id"]
 
 
+def test_unwritable_receipt_is_logged_and_the_accepted_install_is_resent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deliveries: list[dict[str, Any]],
+) -> None:
+    # A file where the receipt directory belongs makes every receipt write fail.
+    (tmp_path / "install-deliveries-v1").write_text("not a directory")
+
+    assert provider.capture_install_detected_if_needed()
+    provider.shutdown_analytics(flush=True, timeout=5)
+
+    failures = (tmp_path / "analytics_errors.log").read_text()
+    assert 'stage="install_receipt"' in failures
+    assert "install-deliveries-v1" in failures
+    # The legacy marker still lands, so the retry is a recovery, not a first install.
+    assert (tmp_path / "installed").exists()
+
+    restart(monkeypatch)
+    assert provider.capture_install_detected_if_needed()
+    provider.shutdown_analytics(flush=True, timeout=5)
+    assert [event["event"] for event in deliveries] == ["install_detected", "install_detected"]
+    assert deliveries[1]["properties"]["install_detection_reason"] == "unverified_marker"
+
+
 @pytest.mark.parametrize("change", ["identity", "destination"])
 def test_delivery_receipt_is_scoped_to_identity_and_destination(
     monkeypatch: pytest.MonkeyPatch,
