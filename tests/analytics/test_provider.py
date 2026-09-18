@@ -45,6 +45,9 @@ class _StubAnalytics:
     def capture(self, event: Event, properties: provider.Properties | None = None) -> None:
         self.events.append((event, properties))
 
+    def _install_delivery_confirmed(self) -> bool:
+        return False
+
 
 def _stub_httpx_client(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     posted_payloads: list[dict[str, object]] = []
