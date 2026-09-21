@@ -1162,6 +1162,30 @@ def _run_action_turn(
         counts.handled,
         cancelled,
     )
+    # Successful runs need the same provider identity as failures. Static slash
+    # dispatch uses the loop machinery but never attempts a provider request.
+    from core.agent_harness.accounting.token_accounting import (
+        LlmRunInfo,
+        resolve_model_name,
+        resolve_provider_name,
+    )
+    from infrastructure.analytics.prompt_log.recorder import PromptRecorder
+
+    recorder = PromptRecorder.current()
+    if recorder is not None:
+        if isinstance(built.llm, _StaticToolCallLLM):
+            recorder.set_llm_attempted(False)
+        else:
+            recorder.set_run(
+                LlmRunInfo(
+                    model=resolve_model_name(built.llm),
+                    provider=resolve_provider_name(built.llm),
+                    input_tokens=getattr(result, "input_tokens", None),
+                    output_tokens=getattr(result, "output_tokens", None),
+                )
+            )
+        if result.hit_iteration_cap and not cancelled:
+            recorder.set_error("iteration_limit", "Agent stopped before producing a final answer.")
     tool_evidence, evidence_success_count = (
         collect_tool_evidence(getattr(result, "tool_results", ()))
         if getattr(session, "session_goal", None) is not None
@@ -1177,8 +1201,8 @@ def _run_action_turn(
         response_streamed=response_streamed,
         hit_iteration_cap=bool(result.hit_iteration_cap and not cancelled),
         cancelled=cancelled,
-        input_tokens=int(getattr(result, "input_tokens", 0) or 0),
-        output_tokens=int(getattr(result, "output_tokens", 0) or 0),
+        input_tokens=getattr(result, "input_tokens", None),
+        output_tokens=getattr(result, "output_tokens", None),
         tool_evidence=tool_evidence,
         evidence_success_count=evidence_success_count,
     )
