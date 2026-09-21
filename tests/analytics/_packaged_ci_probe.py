@@ -30,6 +30,9 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 def main() -> None:
     binary = Path(sys.argv[1]).resolve()
+    if binary.is_dir():
+        binary = binary / "opensre"
+    assert binary.is_file(), f"Missing packaged executable: {binary}"
     evidence = Path(sys.argv[2]).resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     host = {
