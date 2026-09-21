@@ -72,6 +72,12 @@ if TYPE_CHECKING:
         ANALYTICS_EVENT_SCHEMA_VERSION as ANALYTICS_EVENT_SCHEMA_VERSION,
     )
     from config.constants.analytics import (
+        ANALYTICS_EXECUTION_CONTEXT_ENV as ANALYTICS_EXECUTION_CONTEXT_ENV,
+    )
+    from config.constants.analytics import (
+        ANALYTICS_EXECUTION_CONTEXT_PATH as ANALYTICS_EXECUTION_CONTEXT_PATH,
+    )
+    from config.constants.analytics import (
         ANALYTICS_INGEST_PATH as ANALYTICS_INGEST_PATH,
     )
     from config.constants.analytics import (
@@ -91,6 +97,10 @@ if TYPE_CHECKING:
     )
     from config.constants.analytics import (
         ANALYTICS_MAX_PAYLOAD_BYTES as ANALYTICS_MAX_PAYLOAD_BYTES,
+    )
+    from config.constants.analytics import ANALYTICS_RUNNER_AUDIENCE as ANALYTICS_RUNNER_AUDIENCE
+    from config.constants.analytics import (
+        ANALYTICS_RUNNER_TOKEN_HEADER as ANALYTICS_RUNNER_TOKEN_HEADER,
     )
     from config.constants.analytics import (
         ANALYTICS_SIGNATURE_HEADER as ANALYTICS_SIGNATURE_HEADER,
