@@ -75,7 +75,9 @@ def execution_evidence(
         properties["is_test"] = True
     if context is not None and context.execution_origin == "github_actions":
         properties.update(
-            is_ci=True, execution_environment="ci_container" if is_container else "ci"
+            is_ci=True,
+            ci_detection_status="detected",
+            execution_environment="ci_container" if is_container else "ci",
         )
         if context.token:
             headers[ANALYTICS_RUNNER_TOKEN_HEADER] = context.token

@@ -35,6 +35,7 @@ def test_context_token_is_bound_to_runtime_identity(tmp_path: Path, monkeypatch)
     assert headers == {}
     props, headers = execution_evidence("expected", is_ci=False, is_container=True)
     assert props["is_ci"] is True
+    assert props["ci_detection_status"] == "detected"
     assert headers["X-OpenSRE-Runner-Token"] == "private-token"
     assert "private-token" not in repr(read_runner_provenance())
     assert "private-token" not in json.dumps(props)
@@ -43,5 +44,6 @@ def test_context_token_is_bound_to_runtime_identity(tmp_path: Path, monkeypatch)
 def test_docker_launch_mounts_context_without_relying_on_ci_environment(tmp_path: Path) -> None:
     command = docker_command("runtime-image", tmp_path, ["opensre", "--record-install"])
     assert f"type=bind,source={tmp_path},target=/run/opensre,readonly" in command
+    assert "OPENSRE_WIZARD_STORE_PATH=/opensre-home/opensre.json" in command
     assert "CI" not in command and "GITHUB_ACTIONS" not in command
     assert command[-3:] == ["runtime-image", "opensre", "--record-install"]

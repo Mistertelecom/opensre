@@ -19,10 +19,12 @@ synthetic checks, and `--require-delivery` when the command records an install a
 the job must fail unless ingestion acknowledges it.
 
 The Docker path mounts runner context independently of CI environment variables.
-Nested containers must also use this launcher and its mount contract. Do not
+Have the trusted job launch each container through this wrapper. A child does not
+receive permission to mint runner credentials itself. Do not
 copy only the context JSON into an image: credentials expire and the directory
 mount must remain live for renewal. Native child processes must preserve the
-provided `OPENSRE_HOME` and `OPENSRE_EXECUTION_CONTEXT_PATH`. Do not override the
+provided `OPENSRE_HOME`, `OPENSRE_WIZARD_STORE_PATH`, and
+`OPENSRE_EXECUTION_CONTEXT_PATH`. Do not override the
 profile or share its installation ID across jobs.
 
 Ingestion verifies GitHub's signature, repository and owner IDs, token lifetime,

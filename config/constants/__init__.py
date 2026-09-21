@@ -749,6 +749,9 @@ if TYPE_CHECKING:
         USERS_DIR_NAME as USERS_DIR_NAME,
     )
     from config.constants.paths import (
+        WIZARD_STORE_PATH_ENV as WIZARD_STORE_PATH_ENV,
+    )
+    from config.constants.paths import (
         UnsafePathSegmentError as UnsafePathSegmentError,
     )
     from config.constants.paths import ci_fix_ledger_path as ci_fix_ledger_path

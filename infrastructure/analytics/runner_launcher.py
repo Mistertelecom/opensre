@@ -19,7 +19,7 @@ from config.constants.analytics import (
     ANALYTICS_EXECUTION_CONTEXT_PATH,
     ANALYTICS_RUNNER_AUDIENCE,
 )
-from config.constants.paths import OPENSRE_HOME_ENV
+from config.constants.paths import OPENSRE_HOME_ENV, WIZARD_STORE_PATH_ENV
 
 
 def fetch_github_token(identity: str) -> str:
@@ -66,6 +66,8 @@ def docker_command(image: str, directory: Path, command: list[str]) -> list[str]
         f"type=bind,source={directory / 'home'},target=/opensre-home",
         "--env",
         f"{OPENSRE_HOME_ENV}=/opensre-home",
+        "--env",
+        f"{WIZARD_STORE_PATH_ENV}=/opensre-home/opensre.json",
         image,
         *command,
     ]
@@ -119,6 +121,7 @@ def main() -> int:
         environment.update(
             {
                 OPENSRE_HOME_ENV: str(profile),
+                WIZARD_STORE_PATH_ENV: str(profile / "opensre.json"),
                 ANALYTICS_EXECUTION_CONTEXT_ENV: str(
                     directory / Path(ANALYTICS_EXECUTION_CONTEXT_PATH).name
                 ),
