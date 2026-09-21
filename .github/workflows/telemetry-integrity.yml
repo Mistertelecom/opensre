@@ -2,6 +2,15 @@ name: Telemetry integrity
 
 on:
   workflow_dispatch:
+    inputs:
+      packaged_ci_probe:
+        description: "Run only the published macOS binary against live analytics ingestion"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Published release tag for the packaged probe (required when enabled)"
+        type: string
+        required: false
   push:
     branches: [main]
     paths:
@@ -40,6 +49,7 @@ env:
 
 jobs:
   native:
+    if: ${{ !inputs.packaged_ci_probe }}
     name: Identity and login / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -67,6 +77,7 @@ jobs:
           path: integrity-evidence/
 
   container:
+    if: ${{ !inputs.packaged_ci_probe }}
     name: Container runtime / persistent and fresh identity storage
     runs-on: ubuntu-latest
     container: python:3.12-bookworm
@@ -85,4 +96,43 @@ jobs:
         if: always()
         with:
           name: telemetry-integrity-container
+          path: integrity-evidence/
+
+  packaged-macos:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.packaged_ci_probe }}
+    name: Published CLI CI detection / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Download and verify the published binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG"
+          mkdir -p integrity-evidence release-binary
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "opensre_*_${TARGET}.tar.gz*" --dir release-binary
+          cd release-binary
+          shasum -a 256 -c ./*.sha256 | tee ../integrity-evidence/checksum.txt
+          tar -xzf ./*.tar.gz
+      - name: Validate inherited CI environment and emit live events
+        run: uv run --no-project --python 3.12 python tests/analytics/_packaged_ci_probe.py release-binary/opensre integrity-evidence
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: packaged-ci-${{ matrix.target }}
           path: integrity-evidence/
