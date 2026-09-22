@@ -32,11 +32,6 @@ jobs:
     if: github.repository == 'Tracer-Cloud/opensre'
     permissions:
       contents: read
-    env:
-      # Authenticate install.sh / install.ps1 metadata lookups so post-publish
-      # verification uses the 5,000/h authenticated GitHub API quota instead of
-      # the per-IP 60/h anonymous one that shared runner IPs exhaust (#6344).
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +75,12 @@ jobs:
         # On macOS this also runs the Homebrew stable-tap tests in
         # test_live_installers.py — Homebrew ships preinstalled on
         # macos-latest runners, so they aren't skipped.
+        # GITHUB_TOKEN is scoped to this step only: it authenticates the
+        # installer's api.github.com metadata lookups (5,000/h instead of the
+        # per-IP 60/h anonymous quota that shared runner IPs exhaust, #6344).
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
           uv run python -m pytest ${{ matrix.test_path }} -v \
