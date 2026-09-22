@@ -21,13 +21,19 @@ See [CI.md](../../CI.md) for local parity commands before push.
 
 ## Canary concurrency policy
 
-`installer-canary.yml` runs at most one cycle at a time, across all channels: the
-`report` job maintains a single globally labeled `installer-canary-failure`
-tracking issue, so that shared issue — not the release tag — is the contended
-resource the `concurrency` group is scoped to. `cancel-in-progress` is `false` —
-runs queue rather than cancel, so a report is never interrupted mid-flight and
-the newest completed run's verdict is the final state. Only one run can be
-pending per group, so queued runs cannot pile up.
+`installer-canary.yml` serializes runs **per channel** — the pinned tag, or
+`latest` for scheduled and empty-tag runs — with `cancel-in-progress: false`:
+runs queue, a running canary or report is never interrupted, and a newer
+same-channel arrival supersedes an older pending same-channel run. That
+supersession is scope-equivalent (the newest completed cycle for a channel is
+that channel's verdict), and different channels never block each other.
+
+The `report` job keeps **one tracking issue per channel**
+(`Installer canary failing (<channel>)`): same-channel cycles are serialized by
+the group, cross-channel cycles touch disjoint issues, and a stale success can
+therefore never close another channel's failure. Issues created before channel
+scoping carry the bare `Installer canary failing` title and are adopted as the
+`latest` channel by the next cycle.
 
 ## CodeQL ownership
 
