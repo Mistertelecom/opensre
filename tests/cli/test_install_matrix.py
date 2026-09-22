@@ -129,6 +129,7 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
             out=""
             url=""
             args=("$@")
+            headers=()
             i=0
             while [ "$i" -lt "${{#args[@]}}" ]; do
               arg="${{args[$i]}}"
@@ -137,13 +138,25 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
                   i=$((i + 1))
                   out="${{args[$i]}}"
                   ;;
-                -H|--header|--retry|--retry-delay) i=$((i + 1)) ;;
+                -H|--header)
+                  i=$((i + 1))
+                  headers+=("${{args[$i]}}")
+                  ;;
+                --retry|--retry-delay) i=$((i + 1)) ;;
                 --fail|--silent|--show-error|--location) ;;
                 http://*|https://*) url="$arg" ;;
               esac
               i=$((i + 1))
             done
             [ -n "$url" ] || {{ echo "curl-shim: missing url: $*" >&2; exit 2; }}
+            log={json.dumps(str(bin_dir / "curl-headers.log"))}
+            {{
+              printf '%s' "$url"
+              if [ "${{#headers[@]}}" -gt 0 ]; then
+                for header in "${{headers[@]}}"; do printf '\\t%s' "$header"; done
+              fi
+              printf '\n'
+            }} >> "$log"
             map={json.dumps(str(mapping_path))}
             assets={json.dumps(str(assets_dir))}
             if printf '%s' "$url" | grep -q 'api.github.com'; then
@@ -351,6 +364,8 @@ def test_install_sh_source_exposes_env_knobs() -> None:
         "OPENSRE_MAIN_RELEASE_TAG",
         "OPENSRE_INSTALL_VERBOSE",
         "OPENSRE_INSTALL_REPO",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
         'INSTALL_CHANNEL="${OPENSRE_INSTALL_CHANNEL:-main}"',
         "ensure_github_cli",
         "warm_first_launch",
@@ -372,6 +387,9 @@ def test_install_ps1_source_exposes_all_windows_install_knobs() -> None:
         "OPENSRE_VERSION",
         "OPENSRE_MAIN_RELEASE_TAG",
         "OPENSRE_INSTALL_VERBOSE",
+        "$env:GITHUB_TOKEN",
+        "$env:GH_TOKEN",
+        '"Authorization"',
         "winget install --id GitHub.cli",
         "Start-OpenSreOnboardingAfterInstall",
         'else { "main" }',
@@ -496,6 +514,32 @@ def test_install_sh_main_channel_end_to_end(tmp_path: Path) -> None:
     assert "opensre" in version.stdout.lower() or "0.1" in version.stdout
     assert "Welcome to OpenSRE" in combined or "installed successfully" in combined
     assert "opensre onboard" not in combined
+
+
+def test_install_sh_sends_github_token_only_to_api_urls(tmp_path: Path) -> None:
+    """``GITHUB_TOKEN`` becomes an Authorization header for api.github.com only (#6344).
+
+    The installer canary 403'd on shared-runner IPs because metadata lookups are
+    unauthenticated; the token lifts the lookup onto the 5,000/h quota.
+    """
+    result = _run_install_sh(tmp_path, "--main", env_extra={"GITHUB_TOKEN": "shim-token-123"})
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+
+    lines = (tmp_path / "shim-bin" / "curl-headers.log").read_text(encoding="utf-8").splitlines()
+    api_lines = [line for line in lines if "api.github.com" in line]
+    asset_lines = [line for line in lines if "/releases/download/" in line]
+    assert api_lines, lines
+    assert all("Authorization: Bearer shim-token-123" in line for line in api_lines), api_lines
+    assert asset_lines, lines
+    assert all("Authorization" not in line for line in asset_lines), asset_lines
+
+
+def test_install_sh_omits_authorization_without_token(tmp_path: Path) -> None:
+    result = _run_install_sh(tmp_path, "--main", env_extra={"GITHUB_TOKEN": "", "GH_TOKEN": ""})
+    assert result.returncode == 0, result.stdout + result.stderr
+    log = (tmp_path / "shim-bin" / "curl-headers.log").read_text(encoding="utf-8")
+    assert "Authorization" not in log, log
 
 
 def test_install_sh_version_channel_end_to_end(tmp_path: Path) -> None:

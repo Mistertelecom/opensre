@@ -278,10 +278,24 @@ download_to() {
 
 download_text() {
   local url="$1"
+  local auth_header=()
+
+  # GitHub's REST API rate-limits unauthenticated requests per IP (60/h) and
+  # shared CI runner IPs can exhaust that budget mid-run — the installer canary
+  # hit 403s on the macOS leg (#6344). Honor GITHUB_TOKEN / GH_TOKEN for
+  # api.github.com only; the token is never sent to any other host.
+  if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
+    case "$url" in
+      https://api.github.com/*)
+        auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN:-${GH_TOKEN:-}}")
+        ;;
+    esac
+  fi
 
   curl "${CURL_FLAGS[@]}" \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: opensre-install-script" \
+    ${auth_header[@]+"${auth_header[@]}"} \
     "$url"
 }
 

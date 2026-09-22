@@ -523,9 +523,20 @@ function Invoke-OpenSreRestMethod {
         [string]$Uri
     )
 
+    $headers = Get-OpenSreRequestHeaders
+
+    # Honor GITHUB_TOKEN / GH_TOKEN for api.github.com requests so release
+    # metadata uses the authenticated API quota (5,000/h) instead of the
+    # per-IP 60/h anonymous one that shared CI runners can exhaust (#6344).
+    # The token is never sent to any other host.
+    $token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } else { "" }
+    if ($token -and $Uri.StartsWith("https://api.github.com/")) {
+        $headers["Authorization"] = "Bearer $token"
+    }
+
     $params = @{
         Uri = $Uri
-        Headers = Get-OpenSreRequestHeaders
+        Headers = $headers
     }
 
     $command = Get-Command Invoke-RestMethod -ErrorAction Stop
