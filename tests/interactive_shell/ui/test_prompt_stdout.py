@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import threading
 
 import pytest
 from prompt_toolkit.application import create_app_session
@@ -134,4 +135,57 @@ async def test_ctrl_c_updates_the_live_prompt_before_second_press_exits(
             assert await asyncio.wait_for(prompt_task, timeout=2) == ""
             assert state.exit_requested is True
     finally:
+        repl_reset_ctrl_c_gate()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_cancels_active_turn_then_second_press_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERM", "xterm-256color")
+    terminal = io.StringIO()
+    output = Vt100_Output(
+        terminal,
+        get_size=lambda: Size(rows=30, columns=80),
+        term="xterm-256color",
+        enable_cpr=False,
+    )
+    state = ReplState()
+    dispatch_cancel = threading.Event()
+    dispatch_task = asyncio.create_task(asyncio.sleep(60))
+    state.start_dispatch(task=dispatch_task, cancel_event=dispatch_cancel)
+
+    repl_reset_ctrl_c_gate()
+    try:
+        with (
+            create_pipe_input() as pipe_input,
+            create_app_session(
+                input=pipe_input,
+                output=output,
+            ),
+        ):
+            session = Session()
+            prompt = build_prompt_session(session)
+            install_session_key_bindings(prompt, build_cancel_key_bindings(state))
+            prompt_task = asyncio.create_task(
+                prompt.prompt_async(
+                    message=lambda: render_prompt_region(
+                        session,
+                        state,
+                        SpinnerState(),
+                    ),
+                    bottom_toolbar=lambda: "",
+                    refresh_interval=0,
+                )
+            )
+            await _wait_for_output(terminal, "Auto (")
+
+            pipe_input.send_bytes(b"\x03\x03")
+
+            assert await asyncio.wait_for(prompt_task, timeout=2) == ""
+            assert dispatch_cancel.is_set()
+            assert state.exit_requested is True
+    finally:
+        dispatch_task.cancel()
+        await asyncio.gather(dispatch_task, return_exceptions=True)
         repl_reset_ctrl_c_gate()

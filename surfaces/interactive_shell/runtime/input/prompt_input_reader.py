@@ -66,8 +66,8 @@ class PromptInputReader:
                 self._render_session_resume_hint()
                 return InputClosed()
             except KeyboardInterrupt:
-                if self.state.is_dispatch_running():
-                    return InputCancelled()
+                # Match the prompt key binding: a first press may cancel active
+                # work, but the second press exits even while cancellation unwinds.
                 if repl_prompt_ctrl_c_should_exit():
                     self.state.clear_ctrl_c_exit_hint()
                     return InputClosed()

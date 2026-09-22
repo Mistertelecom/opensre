@@ -114,6 +114,7 @@ async def test_prompt_input_reader_keyboard_interrupt_with_dispatch_running_retu
     None
 ):
     state, task = _running_state()
+    reader_module.repl_reset_ctrl_c_gate()
     try:
         event = await _reader(
             FakePrompt(lambda: (_ for _ in ()).throw(KeyboardInterrupt)),
@@ -122,8 +123,10 @@ async def test_prompt_input_reader_keyboard_interrupt_with_dispatch_running_retu
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        reader_module.repl_reset_ctrl_c_gate()
 
     assert event == InputCancelled()
+    assert state.is_ctrl_c_exit_hint_visible()
 
 
 @pytest.mark.asyncio

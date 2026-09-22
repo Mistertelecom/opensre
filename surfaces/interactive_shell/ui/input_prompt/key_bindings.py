@@ -125,17 +125,17 @@ def build_cancel_key_bindings(state: _DispatchCancelState) -> KeyBindings:
     @kb.add("c-c", eager=True)
     def _on_ctrl_c(event: KeyPressEvent) -> None:
         event.current_buffer.reset()
-        if state.is_dispatch_running():
-            state.clear_ctrl_c_exit_hint()
-            state.cancel_current_dispatch()
-            event.app.invalidate()
-            return
+        # Check the exit gate before dispatch state. The first press below
+        # cancels and arms the gate; the second must still exit while that
+        # dispatch is unwinding and continues to report itself as running.
         if repl_prompt_ctrl_c_should_exit():
             state.clear_ctrl_c_exit_hint()
             state.request_exit()
             event.app.exit(result="")
             return
         state.arm_ctrl_c_exit_hint(CTRL_C_DOUBLE_PRESS_WINDOW_S)
+        if state.is_dispatch_running():
+            state.cancel_current_dispatch()
         # Full repaint, not a diff: the transient hint replaces the idle
         # "Ready…" line in place, and the renderer's line diff can skip an
         # in-place text→text swap on that row, leaving the hint unshown.
