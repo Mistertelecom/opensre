@@ -125,17 +125,15 @@ jobs:
           # cycles touch disjoint issues — so reports can never race on one
           # issue or close another channel's failure. Legacy issues created
           # before channel scoping carry the bare title; adopt them as `latest`
-          # instead of leaving them open.
+          # instead of leaving them open. The channel is passed to jq as data
+          # (env.CHANNEL) so any tag string is safe — it is never interpolated
+          # into the jq program.
           channel="${OPENSRE_LIVE_INSTALL_TAG:-latest}"
-          legacy_filter=""
-          if [ "$channel" = "latest" ]; then
-            legacy_filter=' or .title == "Installer canary failing"'
-          fi
           existing_issue="$(
-            gh issue list --repo "${{ github.repository }}" \
+            CHANNEL="$channel" gh issue list --repo "${{ github.repository }}" \
               --label "$TRACKING_LABEL" --state open \
               --json number,title \
-              --jq "[.[] | select(.title == \"Installer canary failing (${channel})\"${legacy_filter})][0].number // empty" \
+              --jq '[.[] | select(.title == ("Installer canary failing (" + env.CHANNEL + ")") or (env.CHANNEL == "latest" and .title == "Installer canary failing"))][0].number // empty' \
               || true
           )"
 
