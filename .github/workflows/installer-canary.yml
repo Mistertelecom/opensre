@@ -23,6 +23,17 @@ permissions:
   contents: read
   issues: write
 
+# One report cycle per channel at a time (#6152): the `report` job maintains the
+# shared `installer-canary-failure` tracking issue, so overlapping runs could
+# race on it — and a stale success could close an issue a newer failure opened.
+# Runs queue instead of cancelling (`cancel-in-progress: false`): the report is
+# this workflow's product and must not be interrupted mid-flight, and the newest
+# completed run's verdict is the final state. At most one run can be pending per
+# group, so queued runs cannot pile up.
+concurrency:
+  group: installer-canary-${{ github.event.client_payload.tag || inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
 env:
   OPENSRE_LIVE_INSTALL: "1"
   OPENSRE_LIVE_INSTALL_TAG: ${{ github.event.client_payload.tag || inputs.tag || '' }}

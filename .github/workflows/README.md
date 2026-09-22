@@ -19,6 +19,16 @@ Internal notes for repository automation under `.github/workflows/`. Not publish
 
 See [CI.md](../../CI.md) for local parity commands before push.
 
+## Canary concurrency policy
+
+`installer-canary.yml` runs at most one report cycle per channel at a time. Its
+workflow-level `concurrency` group is keyed by the pinned tag (`latest` for
+scheduled and empty-tag runs), and `cancel-in-progress` is `false` — runs queue
+rather than cancel. The `report` job is the workflow's product (it maintains the
+shared `installer-canary-failure` tracking issue), so a run is never interrupted
+mid-report and the newest completed run's verdict is the final state. Only one
+run can be pending per group, so queued runs cannot pile up.
+
 ## CodeQL ownership
 
 The checked-in workflow owns CodeQL for this repository. Full Python and
